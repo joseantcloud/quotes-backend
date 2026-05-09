@@ -4,111 +4,187 @@ trigger:
       - main
   paths:
     include:
-      - quotes-backend/**
+      - quotes-backend/*
 
 pool:
   name: Default
 
 variables:
-- group: vars-backend
-- name: buildConfiguration
-  value: Release
-- name: artifactName
-  value: backend-drop
+  - group: vars-backend
+
+  - name: buildConfiguration
+    value: Release
+
+  - name: projectPath
+    value: quotes-backend/AzureQuotes.Api.csproj
+
+  - name: publishDirectory
+    value: $(Build.ArtifactStagingDirectory)/publish
+
+  - name: packagePath
+    value: $(Build.ArtifactStagingDirectory)/backend.zip
 
 stages:
-- stage: Build
-  displayName: Build backend
-  jobs:
-  - job: BuildBackend
-    displayName: Restore, build and publish
-    steps:
-    - task: UseDotNet@2
-      displayName: Use .NET 10 SDK
-      inputs:
-        packageType: sdk
-        version: 10.x
+  - stage: Build
+    displayName: Build Backend
+    jobs:
+      - job: BuildBackend
+        displayName: Build ASP.NET Core API
+        steps:
+          - checkout: self
 
-    - task: DotNetCoreCLI@2
-      displayName: Restore
-      inputs:
-        command: restore
-        projects: quotes-backend/AzureQuotes.Api.csproj
-
-    - task: DotNetCoreCLI@2
-      displayName: Build
-      inputs:
-        command: build
-        projects: quotes-backend/AzureQuotes.Api.csproj
-        arguments: --configuration $(buildConfiguration) --no-restore
-
-    - task: DotNetCoreCLI@2
-      displayName: Publish
-      inputs:
-        command: publish
-        publishWebProjects: false
-        projects: quotes-backend/AzureQuotes.Api.csproj
-        arguments: --configuration $(buildConfiguration) --output $(Build.ArtifactStagingDirectory)/publish --no-build
-        zipAfterPublish: false
-
-    - task: ArchiveFiles@2
-      displayName: Create backend.zip
-      inputs:
-        rootFolderOrFile: $(Build.ArtifactStagingDirectory)/publish
-        includeRootFolder: false
-        archiveType: zip
-        archiveFile: $(Build.ArtifactStagingDirectory)/backend.zip
-        replaceExistingArchive: true
-
-    - publish: $(Build.ArtifactStagingDirectory)/backend.zip
-      displayName: Publish artifact
-      artifact: $(artifactName)
-
-- stage: Deploy
-  displayName: Deploy backend
-  dependsOn: Build
-  jobs:
-  - deployment: DeployBackend
-    displayName: Deploy to Azure App Service
-    environment: $(environmentName)
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-          - download: current
-            artifact: $(artifactName)
-
-          - task: AzureWebApp@1
-            displayName: Zip deploy backend
+          - task: UseDotNet@2
+            displayName: Install .NET SDK
             inputs:
-              azureSubscription: $(azureServiceConnection)
-              appType: webAppLinux
-              appName: $(webAppName)
-              package: $(Pipeline.Workspace)/$(artifactName)/backend.zip
-              runtimeStack: DOTNETCORE|10.0
+              packageType: sdk
+              version: '10.0.x'
 
-          - task: AzureAppServiceSettings@1
-            displayName: Configure backend app settings
+          - task: DotNetCoreCLI@2
+            displayName: Restore
             inputs:
-              azureSubscription: $(azureServiceConnection)
-              appName: $(webAppName)
-              resourceGroupName: $(resourceGroupName)
-              appSettings: |
-                [
-                  { "name": "DOTNET_ENVIRONMENT", "value": "Production", "slotSetting": false },
-                  { "name": "ASPNETCORE_URLS", "value": "http://0.0.0.0:8080", "slotSetting": false },
-                  { "name": "WEBSITES_PORT", "value": "8080", "slotSetting": false },
-                  { "name": "ENVIRONMENT", "value": "production", "slotSetting": false },
-                  { "name": "FRONTEND_BASE_URL", "value": "$(frontendBaseUrl)", "slotSetting": false },
-                  { "name": "BACKEND_BASE_URL", "value": "$(backendBaseUrl)", "slotSetting": false },
-                  { "name": "JWT_SECRET_KEY", "value": "$(JWT_SECRET_KEY)", "slotSetting": false },
-                  { "name": "AZURE_SQL_CONNECTION_STRING", "value": "$(AZURE_SQL_CONNECTION_STRING)", "slotSetting": false },
-                  { "name": "PHOTO_STORAGE_BACKEND", "value": "$(photoStorageBackend)", "slotSetting": false },
-                  { "name": "AZURE_STORAGE_CONNECTION_STRING", "value": "$(AZURE_STORAGE_CONNECTION_STRING)", "slotSetting": false },
-                  { "name": "AZURE_STORAGE_CONTAINER_NAME", "value": "$(storageContainerName)", "slotSetting": false },
-                  { "name": "MAX_PHOTO_MB", "value": "$(maxPhotoMb)", "slotSetting": false },
-                  { "name": "LOG_LEVEL", "value": "$(logLevel)", "slotSetting": false },
-                  { "name": "FEATURE_PUBLIC_FEED_ENABLED", "value": "true", "slotSetting": false },
-                  { "name": "FEATURE_PHOTO_UPLOAD_ENABLED", "value": "true", "slotSetting": false },
-                  { "name": "FEATURE_MAINTENANCEMODE_ENABLED", "value": "false", "slotSetting": false }
-                ]
+              command: restore
+              projects: '$(projectPath)'
+
+          - task: DotNetCoreCLI@2
+            displayName: Build
+            inputs:
+              command: build
+              projects: '$(projectPath)'
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: Publish
+            inputs:
+              command: publish
+              publishWebProjects: false
+              projects: '$(projectPath)'
+              arguments: '--configuration $(buildConfiguration) --output $(publishDirectory) --no-build'
+              zipAfterPublish: false
+              modifyOutputPath: false
+
+          - task: ArchiveFiles@2
+            displayName: Create backend ZIP
+            inputs:
+              rootFolderOrFile: '$(publishDirectory)'
+              includeRootFolder: false
+              archiveType: zip
+              archiveFile: '$(packagePath)'
+              replaceExistingArchive: true
+
+          - publish: '$(packagePath)'
+            displayName: Publish backend artifact
+            artifact: backend-drop
+
+  - stage: Deploy
+    displayName: Deploy Backend
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployBackend
+        displayName: Deploy ASP.NET Core API to Azure App Service
+        environment: $(environmentName)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: backend-drop
+
+                - task: AzureWebApp@1
+                  displayName: Deploy backend ZIP to Azure App Service
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    appType: webAppLinux
+                    appName: $(webAppName)
+                    package: '$(Pipeline.Workspace)/backend-drop/backend.zip'
+                    runtimeStack: 'DOTNETCORE|10.0'
+
+                - task: AzureAppServiceSettings@1
+                  displayName: Configure backend App Settings
+                  inputs:
+                    azureSubscription: $(azureServiceConnection)
+                    appName: $(webAppName)
+                    resourceGroupName: $(resourceGroupName)
+                    appSettings: |
+                      [
+                        {
+                          "name": "DOTNET_ENVIRONMENT",
+                          "value": "Production",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "ASPNETCORE_URLS",
+                          "value": "http://0.0.0.0:8080",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "WEBSITES_PORT",
+                          "value": "8080",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "ENVIRONMENT",
+                          "value": "production",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FRONTEND_BASE_URL",
+                          "value": "$(frontendBaseUrl)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "BACKEND_BASE_URL",
+                          "value": "$(backendBaseUrl)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "JWT_SECRET_KEY",
+                          "value": "$(JWT_SECRET_KEY)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_SQL_CONNECTION_STRING",
+                          "value": "$(AZURE_SQL_CONNECTION_STRING)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "PHOTO_STORAGE_BACKEND",
+                          "value": "$(photoStorageBackend)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_STORAGE_CONNECTION_STRING",
+                          "value": "$(AZURE_STORAGE_CONNECTION_STRING)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_STORAGE_CONTAINER_NAME",
+                          "value": "$(storageContainerName)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "MAX_PHOTO_MB",
+                          "value": "$(maxPhotoMb)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "LOG_LEVEL",
+                          "value": "$(logLevel)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_PUBLIC_FEED_ENABLED",
+                          "value": "true",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_PHOTO_UPLOAD_ENABLED",
+                          "value": "true",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_MAINTENANCEMODE_ENABLED",
+                          "value": "false",
+                          "slotSetting": false
+                        }
+                      ]

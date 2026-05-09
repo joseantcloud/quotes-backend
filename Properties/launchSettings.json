@@ -1,0 +1,14 @@
+{
+  "profiles": {
+    "AzureQuotes.Api": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "launchUrl": "apidocs",
+      "applicationUrl": "http://localhost:5000",
+      "environmentVariables": {
+        "DOTNET_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}

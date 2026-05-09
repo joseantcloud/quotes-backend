@@ -4,7 +4,8 @@ trigger:
       - main
   paths:
     include:
-      - quotes-backend/*
+      - quotes-backend/**
+      - azure-pipelines-backend.yml
 
 pool:
   name: Default
@@ -16,22 +17,44 @@ variables:
     value: Release
 
   - name: projectPath
-    value: quotes-backend/AzureQuotes.Api.csproj
+    value: '**/AzureQuotes.Api.csproj'
 
   - name: publishDirectory
-    value: $(Build.ArtifactStagingDirectory)/publish
+    value: '$(Build.ArtifactStagingDirectory)/publish'
 
   - name: packagePath
-    value: $(Build.ArtifactStagingDirectory)/backend.zip
+    value: '$(Build.ArtifactStagingDirectory)/backend.zip'
 
 stages:
   - stage: Build
     displayName: Build Backend
     jobs:
       - job: BuildBackend
-        displayName: Build ASP.NET Core API
+        displayName: Build ASP.NET Core Backend
         steps:
           - checkout: self
+            displayName: Checkout repository
+
+          - powershell: |
+              Write-Host "====================================="
+              Write-Host "DEBUG - Working directory"
+              Write-Host "====================================="
+              Write-Host "$(System.DefaultWorkingDirectory)"
+
+              Write-Host ""
+              Write-Host "====================================="
+              Write-Host "DEBUG - Repository files"
+              Write-Host "====================================="
+              Get-ChildItem "$(System.DefaultWorkingDirectory)" -Recurse | Select-Object FullName
+
+              Write-Host ""
+              Write-Host "====================================="
+              Write-Host "DEBUG - Searching .csproj files"
+              Write-Host "====================================="
+              Get-ChildItem "$(System.DefaultWorkingDirectory)" -Recurse -Filter *.csproj | ForEach-Object {
+                Write-Host $_.FullName
+              }
+            displayName: Debug project path
 
           - task: UseDotNet@2
             displayName: Install .NET SDK
@@ -81,30 +104,31 @@ stages:
     condition: succeeded()
     jobs:
       - deployment: DeployBackend
-        displayName: Deploy ASP.NET Core API to Azure App Service
-        environment: $(environmentName)
+        displayName: Deploy Backend to Azure App Service
+        environment: '$(environmentName)'
         strategy:
           runOnce:
             deploy:
               steps:
                 - download: current
                   artifact: backend-drop
+                  displayName: Download backend artifact
 
                 - task: AzureWebApp@1
                   displayName: Deploy backend ZIP to Azure App Service
                   inputs:
-                    azureSubscription: $(azureServiceConnection)
+                    azureSubscription: '$(azureServiceConnection)'
                     appType: webAppLinux
-                    appName: $(webAppName)
+                    appName: '$(webAppName)'
                     package: '$(Pipeline.Workspace)/backend-drop/backend.zip'
                     runtimeStack: 'DOTNETCORE|10.0'
 
                 - task: AzureAppServiceSettings@1
                   displayName: Configure backend App Settings
                   inputs:
-                    azureSubscription: $(azureServiceConnection)
-                    appName: $(webAppName)
-                    resourceGroupName: $(resourceGroupName)
+                    azureSubscription: '$(azureServiceConnection)'
+                    appName: '$(webAppName)'
+                    resourceGroupName: '$(resourceGroupName)'
                     appSettings: |
                       [
                         {
@@ -170,6 +194,11 @@ stages:
                         {
                           "name": "LOG_LEVEL",
                           "value": "$(logLevel)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "FEATURE_REFRESH_SECONDS",
+                          "value": "10",
                           "slotSetting": false
                         },
                         {

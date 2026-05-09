@@ -1,15 +1,15 @@
 using System.Security.Claims;
 using System.Text;
+using Azure.Identity;
 using AzureQuotes.Api.Contracts;
 using AzureQuotes.Api.Data;
 using AzureQuotes.Api.Models;
 using AzureQuotes.Api.Services;
-using Azure.Identity;
-using Microsoft.Extensions.Configuration.AzureAppConfiguration;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration.AzureAppConfiguration;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi.Models;
@@ -20,19 +20,36 @@ var builder = WebApplication.CreateBuilder(args);
 
 var appConfigConnectionString = builder.Configuration["AZURE_APP_CONFIG_CONNECTION_STRING"];
 var appConfigEndpoint = builder.Configuration["AZURE_APP_CONFIG_ENDPOINT"];
-if (!string.IsNullOrWhiteSpace(appConfigConnectionString))
+
+try
 {
-    builder.Configuration.AddAzureAppConfiguration(options => options.Connect(appConfigConnectionString).Select("*"));
+    if (!string.IsNullOrWhiteSpace(appConfigConnectionString))
+    {
+        builder.Configuration.AddAzureAppConfiguration(options =>
+        {
+            options.Connect(appConfigConnectionString)
+                .Select("*");
+        });
+    }
+    else if (!string.IsNullOrWhiteSpace(appConfigEndpoint))
+    {
+        builder.Configuration.AddAzureAppConfiguration(options =>
+        {
+            options.Connect(new Uri(appConfigEndpoint), new DefaultAzureCredential())
+                .Select("*");
+        });
+    }
 }
-else if (!string.IsNullOrWhiteSpace(appConfigEndpoint))
+catch (Exception ex)
 {
-    builder.Configuration.AddAzureAppConfiguration(options => options.Connect(new Uri(appConfigEndpoint), new DefaultAzureCredential()).Select("*"));
+    Console.WriteLine($"Azure App Configuration was not loaded: {ex.Message}");
 }
 
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
 
 builder.Services.AddEndpointsApiExplorer();
+
 builder.Services.AddSwaggerGen(options =>
 {
     options.SwaggerDoc("v1", new OpenApiInfo
@@ -73,33 +90,53 @@ builder.Services.AddCors(options =>
     options.AddPolicy("frontend", policy =>
     {
         var configuredOrigins = builder.Configuration["FRONTEND_BASE_URL"];
+
         if (string.IsNullOrWhiteSpace(configuredOrigins))
         {
-            policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
+            policy.AllowAnyOrigin()
+                .AllowAnyHeader()
+                .AllowAnyMethod();
+
             return;
         }
 
         var origins = configuredOrigins
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
-        policy.WithOrigins(origins).AllowAnyHeader().AllowAnyMethod();
+        policy.WithOrigins(origins)
+            .AllowAnyHeader()
+            .AllowAnyMethod();
     });
 });
 
 builder.Services.AddDbContext<QuotesDbContext>(options =>
 {
     var sqlConnectionString = builder.Configuration["AZURE_SQL_CONNECTION_STRING"];
-    if (!string.IsNullOrWhiteSpace(sqlConnectionString))
+
+    if (string.IsNullOrWhiteSpace(sqlConnectionString))
     {
-        options.UseSqlServer(sqlConnectionString);
-        return;
+        throw new InvalidOperationException(
+            "AZURE_SQL_CONNECTION_STRING is required. This application uses Azure SQL only.");
     }
 
-    var databaseUrl = builder.Configuration["DATABASE_URL"] ?? "sqlite:///quotes_local.db";
-    options.UseSqlite(ConvertToSqliteConnectionString(databaseUrl));
+    options.UseSqlServer(
+        sqlConnectionString,
+        sqlOptions =>
+        {
+            sqlOptions.EnableRetryOnFailure(
+                maxRetryCount: 5,
+                maxRetryDelay: TimeSpan.FromSeconds(10),
+                errorNumbersToAdd: null);
+        });
 });
 
-var jwtSecret = builder.Configuration["JWT_SECRET_KEY"] ?? "dev-jwt-secret-change-me-please-use-a-long-secret";
+var jwtSecret = builder.Configuration["JWT_SECRET_KEY"];
+
+if (string.IsNullOrWhiteSpace(jwtSecret))
+{
+    throw new InvalidOperationException("JWT_SECRET_KEY is required.");
+}
+
 var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecret));
 
 builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -109,22 +146,28 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
         {
             ValidateIssuer = true,
             ValidIssuer = "azure-quotes-api",
+
             ValidateAudience = true,
             ValidAudience = "azure-quotes-client",
+
             ValidateIssuerSigningKey = true,
             IssuerSigningKey = signingKey,
+
             ValidateLifetime = true,
             ClockSkew = TimeSpan.FromMinutes(1)
         };
     });
 
 builder.Services.AddAuthorization();
+
 builder.Services.AddScoped<PasswordHasher<AppUser>>();
 builder.Services.AddScoped<JwtService>();
 builder.Services.AddSingleton<FeatureFlagService>();
 
 var photoBackend = builder.Configuration["PHOTO_STORAGE_BACKEND"] ?? "local";
-if (photoBackend.Equals("azure", StringComparison.OrdinalIgnoreCase) || photoBackend.Equals("azure_blob", StringComparison.OrdinalIgnoreCase))
+
+if (photoBackend.Equals("azure", StringComparison.OrdinalIgnoreCase)
+    || photoBackend.Equals("azure_blob", StringComparison.OrdinalIgnoreCase))
 {
     builder.Services.AddScoped<IPhotoStorageService, AzureBlobPhotoStorageService>();
 }
@@ -135,13 +178,18 @@ else
 
 var app = builder.Build();
 
-using (var scope = app.Services.CreateScope())
-{
-    var db = scope.ServiceProvider.GetRequiredService<QuotesDbContext>();
-    db.Database.EnsureCreated();
-}
+app.Logger.LogInformation("Application configured to use Azure SQL only.");
+app.Logger.LogInformation("Automatic database initialization is disabled during startup.");
 
-var uploadsPath = Path.Combine(app.Environment.ContentRootPath, app.Configuration["UPLOAD_FOLDER"] ?? "uploads");
+var uploadsFolder =
+    app.Configuration["UPLOAD_FOLDER"]
+    ?? app.Configuration["UPLOADS_PATH"]
+    ?? "uploads";
+
+var uploadsPath = Path.IsPathRooted(uploadsFolder)
+    ? uploadsFolder
+    : Path.Combine(app.Environment.ContentRootPath, uploadsFolder);
+
 Directory.CreateDirectory(uploadsPath);
 
 app.UseStaticFiles(new StaticFileOptions
@@ -155,6 +203,7 @@ app.UseSwagger(options =>
 {
     options.RouteTemplate = "{documentName}/apispec.json";
 });
+
 app.UseSwaggerUI(options =>
 {
     options.RoutePrefix = "apidocs";
@@ -162,6 +211,7 @@ app.UseSwaggerUI(options =>
 });
 
 app.UseCors("frontend");
+
 app.UseAuthentication();
 app.UseAuthorization();
 
@@ -169,19 +219,85 @@ app.MapGet("/", () => Results.Ok(new
 {
     app = "Azure Quotes API",
     status = "running",
+    database = "Azure SQL",
     docs = "/apidocs",
-    openapi = "/v1/apispec.json"
+    openapi = "/apispec.json"
 }));
 
 app.MapGet("/health", () => Results.Ok(new
 {
     status = "healthy",
-    timestamp = DateTimeOffset.UtcNow
+    database = "Azure SQL",
+    timestamp = DateTime.UtcNow
 }));
+
+app.MapGet("/health/db", async (
+    QuotesDbContext db,
+    CancellationToken cancellationToken) =>
+{
+    try
+    {
+        var canConnect = await db.Database.CanConnectAsync(cancellationToken);
+
+        if (!canConnect)
+        {
+            return Results.Problem(
+                title: "Database connection failed",
+                detail: "The application could not connect to Azure SQL.");
+        }
+
+        return Results.Ok(new
+        {
+            status = "database_available",
+            provider = "Azure SQL",
+            timestamp = DateTime.UtcNow
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem(
+            title: "Database connection error",
+            detail: ex.Message);
+    }
+});
+
+app.MapPost("/api/admin/database/ensure-created", async (
+    HttpRequest request,
+    QuotesDbContext db,
+    IConfiguration configuration,
+    CancellationToken cancellationToken) =>
+{
+    var expectedKey = configuration["ADMIN_SETUP_KEY"];
+    var providedKey = request.Headers["X-Setup-Key"].ToString();
+
+    if (string.IsNullOrWhiteSpace(expectedKey))
+    {
+        return Results.Problem(
+            title: "ADMIN_SETUP_KEY is not configured",
+            detail: "Configure ADMIN_SETUP_KEY in .env locally or App Settings in Azure.");
+    }
+
+    if (!string.Equals(expectedKey, providedKey, StringComparison.Ordinal))
+    {
+        return Results.Unauthorized();
+    }
+
+    await db.Database.EnsureCreatedAsync(cancellationToken);
+
+    return Results.Ok(new
+    {
+        status = "database_initialized",
+        provider = "Azure SQL",
+        timestamp = DateTime.UtcNow
+    });
+});
 
 app.MapGet("/apispec.json", () => Results.Redirect("/v1/apispec.json"));
 
-app.MapGet("/api/features", (FeatureFlagService features) => Results.Ok(features.GetFeatures()));
+app.MapGet("/api/features", (FeatureFlagService features) =>
+{
+    return Results.Ok(features.GetFeatures());
+});
 
 app.MapPost("/api/auth/register", async (
     RegisterRequest request,
@@ -191,6 +307,7 @@ app.MapPost("/api/auth/register", async (
     CancellationToken cancellationToken) =>
 {
     var email = NormalizeEmail(request.Email);
+
     if (string.IsNullOrWhiteSpace(email) || !email.Contains('@'))
     {
         return Results.BadRequest(new { error = "Email invalido." });
@@ -202,18 +319,26 @@ app.MapPost("/api/auth/register", async (
     }
 
     var exists = await db.Users.AnyAsync(x => x.Email == email, cancellationToken);
+
     if (exists)
     {
         return Results.Conflict(new { error = "Este usuario ya existe." });
     }
 
-    var user = new AppUser { Email = email };
+    var user = new AppUser
+    {
+        Email = email
+    };
+
     user.PasswordHash = passwordHasher.HashPassword(user, request.Password);
 
     db.Users.Add(user);
     await db.SaveChangesAsync(cancellationToken);
 
-    return Results.Ok(new AuthResponse(jwt.CreateToken(user), "Bearer", ToUserResponse(user)));
+    return Results.Ok(new AuthResponse(
+        jwt.CreateToken(user),
+        "Bearer",
+        ToUserResponse(user)));
 });
 
 app.MapPost("/api/auth/login", async (
@@ -224,26 +349,43 @@ app.MapPost("/api/auth/login", async (
     CancellationToken cancellationToken) =>
 {
     var email = NormalizeEmail(request.Email);
-    var user = await db.Users.FirstOrDefaultAsync(x => x.Email == email, cancellationToken);
+
+    var user = await db.Users
+        .FirstOrDefaultAsync(x => x.Email == email, cancellationToken);
+
     if (user is null)
     {
         return Results.Unauthorized();
     }
 
-    var result = passwordHasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
+    var result = passwordHasher.VerifyHashedPassword(
+        user,
+        user.PasswordHash,
+        request.Password);
+
     if (result == PasswordVerificationResult.Failed)
     {
         return Results.Unauthorized();
     }
 
-    return Results.Ok(new AuthResponse(jwt.CreateToken(user), "Bearer", ToUserResponse(user)));
+    return Results.Ok(new AuthResponse(
+        jwt.CreateToken(user),
+        "Bearer",
+        ToUserResponse(user)));
 });
 
-app.MapGet("/api/me", async (ClaimsPrincipal principal, QuotesDbContext db, CancellationToken cancellationToken) =>
+app.MapGet("/api/me", async (
+    ClaimsPrincipal principal,
+    QuotesDbContext db,
+    CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
+
     var user = await db.Users.FindAsync([userId], cancellationToken);
-    return user is null ? Results.NotFound(new { error = "Usuario no encontrado." }) : Results.Ok(ToUserResponse(user));
+
+    return user is null
+        ? Results.NotFound(new { error = "Usuario no encontrado." })
+        : Results.Ok(ToUserResponse(user));
 }).RequireAuthorization();
 
 app.MapGet("/api/quotes", async (
@@ -254,10 +396,13 @@ app.MapGet("/api/quotes", async (
     CancellationToken cancellationToken) =>
 {
     var scope = request.Query["scope"].ToString();
+
     var authenticated = principal.Identity?.IsAuthenticated == true;
     var userId = authenticated ? GetUserId(principal) : 0;
 
-    IQueryable<Quote> query = db.Quotes.Include(x => x.User).Include(x => x.Likes);
+    IQueryable<Quote> query = db.Quotes
+        .Include(x => x.User)
+        .Include(x => x.Likes);
 
     if (scope.Equals("mine", StringComparison.OrdinalIgnoreCase))
     {
@@ -266,12 +411,16 @@ app.MapGet("/api/quotes", async (
             return Results.Unauthorized();
         }
 
-        query = query.Where(x => x.UserId == userId).OrderByDescending(x => x.CreatedAt);
-        var mine = await query.ToListAsync(cancellationToken);
+        var mine = await query
+            .Where(x => x.UserId == userId)
+            .OrderByDescending(x => x.CreatedAt)
+            .ToListAsync(cancellationToken);
+
         return Results.Ok(mine.Select(x => ToQuoteResponse(x, userId)));
     }
 
     var features = featureFlags.GetFeatures();
+
     if (!features.PublicFeedEnabled)
     {
         return Results.Ok(Array.Empty<QuoteResponse>());
@@ -301,9 +450,14 @@ app.MapPost("/api/quotes", async (
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
+
     var form = await request.ReadFormAsync(cancellationToken);
+
     var content = form["content"].ToString().Trim();
-    var isPublic = !bool.TryParse(form["is_public"], out var parsedIsPublic) || parsedIsPublic;
+
+    var isPublic = !bool.TryParse(form["is_public"], out var parsedIsPublic)
+        || parsedIsPublic;
+
     var photo = form.Files["photo"];
 
     if (string.IsNullOrWhiteSpace(content))
@@ -312,27 +466,43 @@ app.MapPost("/api/quotes", async (
     }
 
     StoredPhoto? storedPhoto = null;
+
     if (photo is not null && photo.Length > 0)
     {
         if (!featureFlags.GetFeatures().PhotoUploadEnabled)
         {
-            logger.LogWarning("quote.photo_upload_rejected feature_disabled user_id={UserId}", userId);
+            logger.LogWarning(
+                "quote.photo_upload_rejected feature_disabled user_id={UserId}",
+                userId);
+
             return Results.BadRequest(new { error = "La subida de fotos esta desactivada." });
         }
 
         try
         {
             storedPhoto = await photoStorage.SaveAsync(photo, cancellationToken);
-            logger.LogInformation("quote.photo_uploaded user_id={UserId} url={Url}", userId, storedPhoto.Url);
+
+            logger.LogInformation(
+                "quote.photo_uploaded user_id={UserId} url={Url}",
+                userId,
+                storedPhoto.Url);
         }
         catch (InvalidOperationException ex)
         {
-            logger.LogWarning(ex, "quote.photo_upload_rejected user_id={UserId}", userId);
+            logger.LogWarning(
+                ex,
+                "quote.photo_upload_rejected user_id={UserId}",
+                userId);
+
             return Results.BadRequest(new { error = ex.Message });
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "quote.photo_upload_failed user_id={UserId}", userId);
+            logger.LogError(
+                ex,
+                "quote.photo_upload_failed user_id={UserId}",
+                userId);
+
             return Results.Problem("No fue posible subir la foto.");
         }
     }
@@ -349,8 +519,14 @@ app.MapPost("/api/quotes", async (
     db.Quotes.Add(quote);
     await db.SaveChangesAsync(cancellationToken);
 
-    var created = await db.Quotes.Include(x => x.User).Include(x => x.Likes).FirstAsync(x => x.Id == quote.Id, cancellationToken);
-    return Results.Created($"/api/quotes/{created.Id}", ToQuoteResponse(created, userId));
+    var created = await db.Quotes
+        .Include(x => x.User)
+        .Include(x => x.Likes)
+        .FirstAsync(x => x.Id == quote.Id, cancellationToken);
+
+    return Results.Created(
+        $"/api/quotes/{created.Id}",
+        ToQuoteResponse(created, userId));
 }).RequireAuthorization();
 
 app.MapPut("/api/quotes/{quoteId:int}", async (
@@ -364,7 +540,12 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
-    var quote = await db.Quotes.Include(x => x.User).Include(x => x.Likes).FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
+
+    var quote = await db.Quotes
+        .Include(x => x.User)
+        .Include(x => x.Likes)
+        .FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
+
     if (quote is null)
     {
         return Results.NotFound(new { error = "Pensamiento no encontrado." });
@@ -376,46 +557,74 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
     }
 
     var form = await request.ReadFormAsync(cancellationToken);
+
     var content = form["content"].ToString().Trim();
+
     if (string.IsNullOrWhiteSpace(content))
     {
         return Results.BadRequest(new { error = "El pensamiento no puede estar vacio." });
     }
 
     quote.Content = content;
-    quote.IsPublic = !bool.TryParse(form["is_public"], out var parsedIsPublic) || parsedIsPublic;
+
+    quote.IsPublic = !bool.TryParse(form["is_public"], out var parsedIsPublic)
+        || parsedIsPublic;
+
     quote.UpdatedAt = DateTime.UtcNow;
 
     var photo = form.Files["photo"];
+
     if (photo is not null && photo.Length > 0)
     {
         if (!featureFlags.GetFeatures().PhotoUploadEnabled)
         {
-            logger.LogWarning("quote.photo_upload_rejected feature_disabled user_id={UserId} quote_id={QuoteId}", userId, quote.Id);
+            logger.LogWarning(
+                "quote.photo_upload_rejected feature_disabled user_id={UserId} quote_id={QuoteId}",
+                userId,
+                quote.Id);
+
             return Results.BadRequest(new { error = "La subida de fotos esta desactivada." });
         }
 
         try
         {
             await photoStorage.DeleteAsync(quote.PhotoStorageKey, cancellationToken);
+
             var storedPhoto = await photoStorage.SaveAsync(photo, cancellationToken);
+
             quote.PhotoUrl = storedPhoto.Url;
             quote.PhotoStorageKey = storedPhoto.StorageKey;
-            logger.LogInformation("quote.photo_uploaded user_id={UserId} quote_id={QuoteId} url={Url}", userId, quote.Id, storedPhoto.Url);
+
+            logger.LogInformation(
+                "quote.photo_uploaded user_id={UserId} quote_id={QuoteId} url={Url}",
+                userId,
+                quote.Id,
+                storedPhoto.Url);
         }
         catch (InvalidOperationException ex)
         {
-            logger.LogWarning(ex, "quote.photo_upload_rejected user_id={UserId} quote_id={QuoteId}", userId, quote.Id);
+            logger.LogWarning(
+                ex,
+                "quote.photo_upload_rejected user_id={UserId} quote_id={QuoteId}",
+                userId,
+                quote.Id);
+
             return Results.BadRequest(new { error = ex.Message });
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "quote.photo_upload_failed user_id={UserId} quote_id={QuoteId}", userId, quote.Id);
+            logger.LogError(
+                ex,
+                "quote.photo_upload_failed user_id={UserId} quote_id={QuoteId}",
+                userId,
+                quote.Id);
+
             return Results.Problem("No fue posible reemplazar la foto.");
         }
     }
 
     await db.SaveChangesAsync(cancellationToken);
+
     return Results.Ok(ToQuoteResponse(quote, userId));
 }).RequireAuthorization();
 
@@ -428,7 +637,10 @@ app.MapDelete("/api/quotes/{quoteId:int}", async (
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
-    var quote = await db.Quotes.FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
+
+    var quote = await db.Quotes
+        .FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
+
     if (quote is null)
     {
         return Results.NotFound(new { error = "Pensamiento no encontrado." });
@@ -442,16 +654,29 @@ app.MapDelete("/api/quotes/{quoteId:int}", async (
     try
     {
         await photoStorage.DeleteAsync(quote.PhotoStorageKey, cancellationToken);
-        logger.LogInformation("quote.photo_deleted user_id={UserId} quote_id={QuoteId}", userId, quote.Id);
+
+        logger.LogInformation(
+            "quote.photo_deleted user_id={UserId} quote_id={QuoteId}",
+            userId,
+            quote.Id);
     }
     catch (Exception ex)
     {
-        logger.LogError(ex, "quote.photo_delete_failed user_id={UserId} quote_id={QuoteId}", userId, quote.Id);
+        logger.LogError(
+            ex,
+            "quote.photo_delete_failed user_id={UserId} quote_id={QuoteId}",
+            userId,
+            quote.Id);
     }
 
     db.Quotes.Remove(quote);
     await db.SaveChangesAsync(cancellationToken);
-    logger.LogInformation("quote.deleted user_id={UserId} quote_id={QuoteId}", userId, quote.Id);
+
+    logger.LogInformation(
+        "quote.deleted user_id={UserId} quote_id={QuoteId}",
+        userId,
+        quote.Id);
+
     return Results.NoContent();
 }).RequireAuthorization();
 
@@ -462,16 +687,27 @@ app.MapPost("/api/quotes/{quoteId:int}/like", async (
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
-    var quote = await db.Quotes.Include(x => x.User).Include(x => x.Likes).FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
+
+    var quote = await db.Quotes
+        .Include(x => x.User)
+        .Include(x => x.Likes)
+        .FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
+
     if (quote is null)
     {
         return Results.NotFound(new { error = "Pensamiento no encontrado." });
     }
 
     var exists = quote.Likes.Any(x => x.UserId == userId);
+
     if (!exists)
     {
-        quote.Likes.Add(new QuoteLike { QuoteId = quoteId, UserId = userId });
+        quote.Likes.Add(new QuoteLike
+        {
+            QuoteId = quoteId,
+            UserId = userId
+        });
+
         await db.SaveChangesAsync(cancellationToken);
     }
 
@@ -485,45 +721,53 @@ app.MapDelete("/api/quotes/{quoteId:int}/like", async (
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
-    var like = await db.QuoteLikes.FirstOrDefaultAsync(x => x.QuoteId == quoteId && x.UserId == userId, cancellationToken);
+
+    var like = await db.QuoteLikes
+        .FirstOrDefaultAsync(
+            x => x.QuoteId == quoteId && x.UserId == userId,
+            cancellationToken);
+
     if (like is not null)
     {
         db.QuoteLikes.Remove(like);
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    var quote = await db.Quotes.Include(x => x.User).Include(x => x.Likes).FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
-    return quote is null ? Results.NotFound(new { error = "Pensamiento no encontrado." }) : Results.Ok(ToQuoteResponse(quote, userId));
+    var quote = await db.Quotes
+        .Include(x => x.User)
+        .Include(x => x.Likes)
+        .FirstOrDefaultAsync(x => x.Id == quoteId, cancellationToken);
+
+    return quote is null
+        ? Results.NotFound(new { error = "Pensamiento no encontrado." })
+        : Results.Ok(ToQuoteResponse(quote, userId));
 }).RequireAuthorization();
 
 app.Run();
 
-static string ConvertToSqliteConnectionString(string databaseUrl)
+static string NormalizeEmail(string email)
 {
-    const string prefix = "sqlite:///";
-    if (databaseUrl.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-    {
-        var fileName = databaseUrl[prefix.Length..];
-        return $"Data Source={fileName}";
-    }
-
-    if (databaseUrl.StartsWith("Data Source=", StringComparison.OrdinalIgnoreCase))
-    {
-        return databaseUrl;
-    }
-
-    return "Data Source=quotes_local.db";
+    return email.Trim().ToLowerInvariant();
 }
-
-static string NormalizeEmail(string email) => email.Trim().ToLowerInvariant();
 
 static int GetUserId(ClaimsPrincipal principal)
 {
-    var rawUserId = principal.FindFirstValue(ClaimTypes.NameIdentifier) ?? principal.FindFirstValue("sub");
-    return int.TryParse(rawUserId, out var userId) ? userId : throw new UnauthorizedAccessException("Token invalido.");
+    var rawUserId =
+        principal.FindFirstValue(ClaimTypes.NameIdentifier)
+        ?? principal.FindFirstValue("sub");
+
+    return int.TryParse(rawUserId, out var userId)
+        ? userId
+        : throw new UnauthorizedAccessException("Token invalido.");
 }
 
-static UserResponse ToUserResponse(AppUser user) => new(user.Id, user.Email, user.CreatedAt);
+static UserResponse ToUserResponse(AppUser user)
+{
+    return new UserResponse(
+        user.Id,
+        user.Email,
+        user.CreatedAt);
+}
 
 static QuoteResponse ToQuoteResponse(Quote quote, int? currentUserId)
 {
@@ -536,5 +780,6 @@ static QuoteResponse ToQuoteResponse(Quote quote, int? currentUserId)
         UpdatedAt: quote.UpdatedAt,
         OwnerEmail: quote.User.Email,
         LikesCount: quote.Likes.Count,
-        LikedByMe: currentUserId.HasValue && quote.Likes.Any(x => x.UserId == currentUserId.Value));
+        LikedByMe: currentUserId.HasValue
+            && quote.Likes.Any(x => x.UserId == currentUserId.Value));
 }

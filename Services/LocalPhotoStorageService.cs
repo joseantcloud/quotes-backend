@@ -1,6 +1,9 @@
+using System.Diagnostics;
+using Microsoft.ApplicationInsights;
+
 namespace AzureQuotes.Api.Services;
 
-public sealed class LocalPhotoStorageService(IConfiguration configuration, IWebHostEnvironment environment) : IPhotoStorageService
+public sealed class LocalPhotoStorageService(IConfiguration configuration, IWebHostEnvironment environment, TelemetryClient telemetry) : IPhotoStorageService
 {
     private static readonly HashSet<string> AllowedContentTypes = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -22,8 +25,28 @@ public sealed class LocalPhotoStorageService(IConfiguration configuration, IWebH
         var fileName = $"{Guid.NewGuid():N}{extension}";
         var absolutePath = Path.Combine(absoluteFolder, fileName);
 
+        var startedAt = DateTimeOffset.UtcNow;
+        var stopwatch = Stopwatch.StartNew();
         await using var fileStream = File.Create(absolutePath);
         await photo.CopyToAsync(fileStream, cancellationToken);
+        stopwatch.Stop();
+
+        telemetry.TrackDependency(
+            dependencyTypeName: "Local File System",
+            target: absoluteFolder,
+            dependencyName: "WriteFile",
+            data: fileName,
+            startTime: startedAt,
+            duration: stopwatch.Elapsed,
+            resultCode: "0",
+            success: true);
+
+        telemetry.TrackEvent("photo.storage.local.saved", new Dictionary<string, string>
+        {
+            ["file_name"] = fileName,
+            ["size_bytes"] = photo.Length.ToString(),
+            ["content_type"] = photo.ContentType
+        });
 
         var backendBaseUrl = (configuration["BACKEND_BASE_URL"] ?? "http://localhost:5000").TrimEnd('/');
         var url = $"{backendBaseUrl}/{uploadFolder}/{fileName}";
@@ -39,11 +62,25 @@ public sealed class LocalPhotoStorageService(IConfiguration configuration, IWebH
 
         var relativePath = storageKey["local:".Length..].Replace('/', Path.DirectorySeparatorChar);
         var absolutePath = Path.Combine(environment.ContentRootPath, relativePath);
+        var startedAt = DateTimeOffset.UtcNow;
+        var stopwatch = Stopwatch.StartNew();
 
         if (File.Exists(absolutePath))
         {
             File.Delete(absolutePath);
         }
+
+        stopwatch.Stop();
+
+        telemetry.TrackDependency(
+            dependencyTypeName: "Local File System",
+            target: Path.GetDirectoryName(absolutePath) ?? environment.ContentRootPath,
+            dependencyName: "DeleteFile",
+            data: absolutePath,
+            startTime: startedAt,
+            duration: stopwatch.Elapsed,
+            resultCode: "0",
+            success: true);
 
         return Task.CompletedTask;
     }

@@ -19,5 +19,7 @@
     <PackageReference Include="Azure.Storage.Blobs" Version="12.*" />
     <PackageReference Include="Azure.Identity" Version="1.*" />
     <PackageReference Include="Microsoft.Extensions.Configuration.AzureAppConfiguration" Version="8.*" />
+    <PackageReference Include="Microsoft.Azure.AppConfiguration.AspNetCore" Version="8.*" />
+    <PackageReference Include="Microsoft.ApplicationInsights.AspNetCore" Version="2.*" />
   </ItemGroup>
 </Project>

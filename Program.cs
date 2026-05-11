@@ -1,10 +1,13 @@
 using System.Security.Claims;
+using System.Diagnostics;
 using System.Text;
 using Azure.Identity;
 using AzureQuotes.Api.Contracts;
 using AzureQuotes.Api.Data;
 using AzureQuotes.Api.Models;
 using AzureQuotes.Api.Services;
+using Microsoft.ApplicationInsights;
+using Microsoft.Azure.AppConfiguration.AspNetCore;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.StaticFiles;
@@ -21,6 +24,20 @@ var builder = WebApplication.CreateBuilder(args);
 var appConfigConnectionString = builder.Configuration["AZURE_APP_CONFIG_CONNECTION_STRING"];
 var appConfigEndpoint = builder.Configuration["AZURE_APP_CONFIG_ENDPOINT"];
 
+if (!string.IsNullOrWhiteSpace(appConfigConnectionString)
+    && appConfigConnectionString.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
+    && appConfigConnectionString.Contains(";Id=", StringComparison.OrdinalIgnoreCase)
+    && !appConfigConnectionString.StartsWith("Endpoint=", StringComparison.OrdinalIgnoreCase))
+{
+    appConfigConnectionString = $"Endpoint={appConfigConnectionString}";
+}
+
+var featureFlagRefreshSeconds = int.TryParse(
+    builder.Configuration["FEATURE_REFRESH_SECONDS"],
+    out var parsedRefreshSeconds)
+    ? Math.Max(parsedRefreshSeconds, 1)
+    : 10;
+
 try
 {
     if (!string.IsNullOrWhiteSpace(appConfigConnectionString))
@@ -28,7 +45,11 @@ try
         builder.Configuration.AddAzureAppConfiguration(options =>
         {
             options.Connect(appConfigConnectionString)
-                .Select("*");
+                .Select("*")
+                .UseFeatureFlags(featureFlags =>
+                {
+                    featureFlags.SetRefreshInterval(TimeSpan.FromSeconds(featureFlagRefreshSeconds));
+                });
         });
     }
     else if (!string.IsNullOrWhiteSpace(appConfigEndpoint))
@@ -36,7 +57,11 @@ try
         builder.Configuration.AddAzureAppConfiguration(options =>
         {
             options.Connect(new Uri(appConfigEndpoint), new DefaultAzureCredential())
-                .Select("*");
+                .Select("*")
+                .UseFeatureFlags(featureFlags =>
+                {
+                    featureFlags.SetRefreshInterval(TimeSpan.FromSeconds(featureFlagRefreshSeconds));
+                });
         });
     }
 }
@@ -47,6 +72,12 @@ catch (Exception ex)
 
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
+
+builder.Services.AddApplicationInsightsTelemetry(options =>
+{
+    options.EnableAdaptiveSampling = false;
+    options.EnableQuickPulseMetricStream = true;
+});
 
 builder.Services.AddEndpointsApiExplorer();
 
@@ -159,6 +190,7 @@ builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     });
 
 builder.Services.AddAuthorization();
+builder.Services.AddAzureAppConfiguration();
 
 builder.Services.AddScoped<PasswordHasher<AppUser>>();
 builder.Services.AddScoped<JwtService>();
@@ -199,6 +231,76 @@ app.UseStaticFiles(new StaticFileOptions
     ContentTypeProvider = new FileExtensionContentTypeProvider()
 });
 
+app.UseAzureAppConfiguration();
+
+app.Use(async (context, next) =>
+{
+    var telemetry = context.RequestServices.GetRequiredService<TelemetryClient>();
+    var stopwatch = Stopwatch.StartNew();
+    var requestPath = context.Request.Path.HasValue ? context.Request.Path.Value! : "/";
+
+    telemetry.TrackTrace(
+        "http.request.start",
+        new Dictionary<string, string>
+        {
+            ["method"] = context.Request.Method,
+            ["path"] = requestPath,
+            ["trace_id"] = Activity.Current?.TraceId.ToString() ?? string.Empty,
+            ["span_id"] = Activity.Current?.SpanId.ToString() ?? string.Empty
+        });
+
+    app.Logger.LogInformation(
+        "http.request.start method={Method} path={Path} trace_id={TraceId}",
+        context.Request.Method,
+        requestPath,
+        Activity.Current?.TraceId.ToString());
+
+    try
+    {
+        await next();
+        stopwatch.Stop();
+
+        telemetry.TrackTrace(
+            "http.request.end",
+            new Dictionary<string, string>
+            {
+                ["method"] = context.Request.Method,
+                ["path"] = requestPath,
+                ["status_code"] = context.Response.StatusCode.ToString(),
+                ["elapsed_ms"] = stopwatch.ElapsedMilliseconds.ToString(),
+                ["trace_id"] = Activity.Current?.TraceId.ToString() ?? string.Empty
+            });
+
+        app.Logger.LogInformation(
+            "http.request.end method={Method} path={Path} status={StatusCode} elapsed_ms={ElapsedMs}",
+            context.Request.Method,
+            requestPath,
+            context.Response.StatusCode,
+            stopwatch.ElapsedMilliseconds);
+    }
+    catch (Exception ex)
+    {
+        stopwatch.Stop();
+
+        telemetry.TrackException(ex, new Dictionary<string, string>
+        {
+            ["method"] = context.Request.Method,
+            ["path"] = requestPath,
+            ["elapsed_ms"] = stopwatch.ElapsedMilliseconds.ToString(),
+            ["trace_id"] = Activity.Current?.TraceId.ToString() ?? string.Empty
+        });
+
+        app.Logger.LogError(
+            ex,
+            "http.request.failed method={Method} path={Path} elapsed_ms={ElapsedMs}",
+            context.Request.Method,
+            requestPath,
+            stopwatch.ElapsedMilliseconds);
+
+        throw;
+    }
+});
+
 app.UseSwagger(options =>
 {
     options.RouteTemplate = "{documentName}/apispec.json";
@@ -233,18 +335,31 @@ app.MapGet("/health", () => Results.Ok(new
 
 app.MapGet("/health/db", async (
     QuotesDbContext db,
+    TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
+    telemetry.TrackEvent("health.db.check.start");
+
     try
     {
         var canConnect = await db.Database.CanConnectAsync(cancellationToken);
 
         if (!canConnect)
         {
+            telemetry.TrackEvent("health.db.check.failed", new Dictionary<string, string>
+            {
+                ["result"] = "cannot_connect"
+            });
+
             return Results.Problem(
                 title: "Database connection failed",
                 detail: "The application could not connect to Azure SQL.");
         }
+
+        telemetry.TrackEvent("health.db.check.succeeded", new Dictionary<string, string>
+        {
+            ["result"] = "connected"
+        });
 
         return Results.Ok(new
         {
@@ -255,6 +370,11 @@ app.MapGet("/health/db", async (
     }
     catch (Exception ex)
     {
+        telemetry.TrackException(ex, new Dictionary<string, string>
+        {
+            ["operation"] = "health.db.check"
+        });
+
         return Results.Problem(
             title: "Database connection error",
             detail: ex.Message);
@@ -296,7 +416,15 @@ app.MapGet("/apispec.json", () => Results.Redirect("/v1/apispec.json"));
 
 app.MapGet("/api/features", (FeatureFlagService features) =>
 {
-    return Results.Ok(features.GetFeatures());
+    var current = features.GetFeatures();
+
+    app.Logger.LogInformation(
+        "features.loaded public_feed_enabled={PublicFeedEnabled} photo_upload_enabled={PhotoUploadEnabled} maintenance_mode_enabled={MaintenanceModeEnabled}",
+        current.PublicFeedEnabled,
+        current.PhotoUploadEnabled,
+        current.MaintenanceModeEnabled);
+
+    return Results.Ok(current);
 });
 
 app.MapPost("/api/auth/register", async (
@@ -304,17 +432,28 @@ app.MapPost("/api/auth/register", async (
     QuotesDbContext db,
     PasswordHasher<AppUser> passwordHasher,
     JwtService jwt,
+    TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
     var email = NormalizeEmail(request.Email);
 
     if (string.IsNullOrWhiteSpace(email) || !email.Contains('@'))
     {
+        telemetry.TrackEvent("auth.register.rejected", new Dictionary<string, string>
+        {
+            ["reason"] = "invalid_email"
+        });
+
         return Results.BadRequest(new { error = "Email invalido." });
     }
 
     if (string.IsNullOrWhiteSpace(request.Password) || request.Password.Length < 6)
     {
+        telemetry.TrackEvent("auth.register.rejected", new Dictionary<string, string>
+        {
+            ["reason"] = "weak_password"
+        });
+
         return Results.BadRequest(new { error = "La clave debe tener minimo 6 caracteres." });
     }
 
@@ -322,6 +461,11 @@ app.MapPost("/api/auth/register", async (
 
     if (exists)
     {
+        telemetry.TrackEvent("auth.register.rejected", new Dictionary<string, string>
+        {
+            ["reason"] = "already_exists"
+        });
+
         return Results.Conflict(new { error = "Este usuario ya existe." });
     }
 
@@ -335,6 +479,17 @@ app.MapPost("/api/auth/register", async (
     db.Users.Add(user);
     await db.SaveChangesAsync(cancellationToken);
 
+    telemetry.TrackEvent("auth.register.succeeded", new Dictionary<string, string>
+    {
+        ["user_id"] = user.Id.ToString(),
+        ["email_domain"] = email.Split('@').Last()
+    });
+
+    app.Logger.LogInformation(
+        "auth.register.succeeded user_id={UserId} email_domain={EmailDomain}",
+        user.Id,
+        email.Split('@').Last());
+
     return Results.Ok(new AuthResponse(
         jwt.CreateToken(user),
         "Bearer",
@@ -346,6 +501,7 @@ app.MapPost("/api/auth/login", async (
     QuotesDbContext db,
     PasswordHasher<AppUser> passwordHasher,
     JwtService jwt,
+    TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
     var email = NormalizeEmail(request.Email);
@@ -355,6 +511,11 @@ app.MapPost("/api/auth/login", async (
 
     if (user is null)
     {
+        telemetry.TrackEvent("auth.login.failed", new Dictionary<string, string>
+        {
+            ["reason"] = "user_not_found"
+        });
+
         return Results.Unauthorized();
     }
 
@@ -365,8 +526,21 @@ app.MapPost("/api/auth/login", async (
 
     if (result == PasswordVerificationResult.Failed)
     {
+        telemetry.TrackEvent("auth.login.failed", new Dictionary<string, string>
+        {
+            ["reason"] = "bad_password",
+            ["user_id"] = user.Id.ToString()
+        });
+
         return Results.Unauthorized();
     }
+
+    telemetry.TrackEvent("auth.login.succeeded", new Dictionary<string, string>
+    {
+        ["user_id"] = user.Id.ToString()
+    });
+
+    app.Logger.LogInformation("auth.login.succeeded user_id={UserId}", user.Id);
 
     return Results.Ok(new AuthResponse(
         jwt.CreateToken(user),
@@ -377,11 +551,18 @@ app.MapPost("/api/auth/login", async (
 app.MapGet("/api/me", async (
     ClaimsPrincipal principal,
     QuotesDbContext db,
+    TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
 
     var user = await db.Users.FindAsync([userId], cancellationToken);
+
+    telemetry.TrackEvent("user.profile.loaded", new Dictionary<string, string>
+    {
+        ["user_id"] = userId.ToString(),
+        ["found"] = (user is not null).ToString()
+    });
 
     return user is null
         ? Results.NotFound(new { error = "Usuario no encontrado." })
@@ -393,6 +574,7 @@ app.MapGet("/api/quotes", async (
     ClaimsPrincipal principal,
     QuotesDbContext db,
     FeatureFlagService featureFlags,
+    TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
     var scope = request.Query["scope"].ToString();
@@ -408,6 +590,11 @@ app.MapGet("/api/quotes", async (
     {
         if (!authenticated)
         {
+            telemetry.TrackEvent("quotes.mine.rejected", new Dictionary<string, string>
+            {
+                ["reason"] = "unauthorized"
+            });
+
             return Results.Unauthorized();
         }
 
@@ -416,13 +603,30 @@ app.MapGet("/api/quotes", async (
             .OrderByDescending(x => x.CreatedAt)
             .ToListAsync(cancellationToken);
 
+        telemetry.TrackEvent("quotes.mine.loaded", new Dictionary<string, string>
+        {
+            ["user_id"] = userId.ToString(),
+            ["count"] = mine.Count.ToString()
+        });
+
         return Results.Ok(mine.Select(x => ToQuoteResponse(x, userId)));
     }
 
     var features = featureFlags.GetFeatures();
 
+    telemetry.TrackEvent("quotes.feed.features_checked", new Dictionary<string, string>
+    {
+        ["public_feed_enabled"] = features.PublicFeedEnabled.ToString(),
+        ["maintenance_mode_enabled"] = features.MaintenanceModeEnabled.ToString()
+    });
+
     if (!features.PublicFeedEnabled)
     {
+        telemetry.TrackEvent("quotes.feed_blocked", new Dictionary<string, string>
+        {
+            ["reason"] = "feature_disabled"
+        });
+
         return Results.Ok(Array.Empty<QuoteResponse>());
     }
 
@@ -437,6 +641,12 @@ app.MapGet("/api/quotes", async (
         .Take(50)
         .Select(x => ToQuoteResponse(x, authenticated ? userId : null));
 
+    telemetry.TrackEvent("quotes.feed.loaded", new Dictionary<string, string>
+    {
+        ["count"] = publicQuotes.Count.ToString(),
+        ["returned"] = randomized.Count().ToString()
+    });
+
     return Results.Ok(randomized);
 });
 
@@ -446,6 +656,7 @@ app.MapPost("/api/quotes", async (
     QuotesDbContext db,
     IPhotoStorageService photoStorage,
     FeatureFlagService featureFlags,
+    TelemetryClient telemetry,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
 {
@@ -462,6 +673,11 @@ app.MapPost("/api/quotes", async (
 
     if (string.IsNullOrWhiteSpace(content))
     {
+        telemetry.TrackEvent("quote.create.rejected", new Dictionary<string, string>
+        {
+            ["reason"] = "empty_content"
+        });
+
         return Results.BadRequest(new { error = "El pensamiento no puede estar vacio." });
     }
 
@@ -474,6 +690,12 @@ app.MapPost("/api/quotes", async (
             logger.LogWarning(
                 "quote.photo_upload_rejected feature_disabled user_id={UserId}",
                 userId);
+
+            telemetry.TrackEvent("quote.photo_upload_blocked", new Dictionary<string, string>
+            {
+                ["user_id"] = userId.ToString(),
+                ["reason"] = "feature_disabled"
+            });
 
             return Results.BadRequest(new { error = "La subida de fotos esta desactivada." });
         }
@@ -519,6 +741,14 @@ app.MapPost("/api/quotes", async (
     db.Quotes.Add(quote);
     await db.SaveChangesAsync(cancellationToken);
 
+    telemetry.TrackEvent("quote.created", new Dictionary<string, string>
+    {
+        ["user_id"] = userId.ToString(),
+        ["quote_id"] = quote.Id.ToString(),
+        ["has_photo"] = (storedPhoto is not null).ToString(),
+        ["is_public"] = quote.IsPublic.ToString()
+    });
+
     var created = await db.Quotes
         .Include(x => x.User)
         .Include(x => x.Likes)
@@ -536,6 +766,7 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
     QuotesDbContext db,
     IPhotoStorageService photoStorage,
     FeatureFlagService featureFlags,
+    TelemetryClient telemetry,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
 {
@@ -562,6 +793,12 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
 
     if (string.IsNullOrWhiteSpace(content))
     {
+        telemetry.TrackEvent("quote.update.rejected", new Dictionary<string, string>
+        {
+            ["reason"] = "empty_content",
+            ["quote_id"] = quoteId.ToString()
+        });
+
         return Results.BadRequest(new { error = "El pensamiento no puede estar vacio." });
     }
 
@@ -582,6 +819,13 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
                 "quote.photo_upload_rejected feature_disabled user_id={UserId} quote_id={QuoteId}",
                 userId,
                 quote.Id);
+
+            telemetry.TrackEvent("quote.photo_upload_blocked", new Dictionary<string, string>
+            {
+                ["user_id"] = userId.ToString(),
+                ["quote_id"] = quote.Id.ToString(),
+                ["reason"] = "feature_disabled"
+            });
 
             return Results.BadRequest(new { error = "La subida de fotos esta desactivada." });
         }
@@ -625,6 +869,14 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
 
     await db.SaveChangesAsync(cancellationToken);
 
+    telemetry.TrackEvent("quote.updated", new Dictionary<string, string>
+    {
+        ["user_id"] = userId.ToString(),
+        ["quote_id"] = quote.Id.ToString(),
+        ["has_photo"] = (quote.PhotoUrl is not null).ToString(),
+        ["is_public"] = quote.IsPublic.ToString()
+    });
+
     return Results.Ok(ToQuoteResponse(quote, userId));
 }).RequireAuthorization();
 
@@ -632,6 +884,7 @@ app.MapDelete("/api/quotes/{quoteId:int}", async (
     int quoteId,
     ClaimsPrincipal principal,
     QuotesDbContext db,
+    TelemetryClient telemetry,
     IPhotoStorageService photoStorage,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
@@ -643,6 +896,12 @@ app.MapDelete("/api/quotes/{quoteId:int}", async (
 
     if (quote is null)
     {
+        telemetry.TrackEvent("quote.delete.rejected", new Dictionary<string, string>
+        {
+            ["reason"] = "not_found",
+            ["quote_id"] = quoteId.ToString()
+        });
+
         return Results.NotFound(new { error = "Pensamiento no encontrado." });
     }
 
@@ -672,6 +931,12 @@ app.MapDelete("/api/quotes/{quoteId:int}", async (
     db.Quotes.Remove(quote);
     await db.SaveChangesAsync(cancellationToken);
 
+    telemetry.TrackEvent("quote.deleted", new Dictionary<string, string>
+    {
+        ["user_id"] = userId.ToString(),
+        ["quote_id"] = quote.Id.ToString()
+    });
+
     logger.LogInformation(
         "quote.deleted user_id={UserId} quote_id={QuoteId}",
         userId,
@@ -684,6 +949,7 @@ app.MapPost("/api/quotes/{quoteId:int}/like", async (
     int quoteId,
     ClaimsPrincipal principal,
     QuotesDbContext db,
+    TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
@@ -695,6 +961,12 @@ app.MapPost("/api/quotes/{quoteId:int}/like", async (
 
     if (quote is null)
     {
+        telemetry.TrackEvent("quote.like.rejected", new Dictionary<string, string>
+        {
+            ["reason"] = "not_found",
+            ["quote_id"] = quoteId.ToString()
+        });
+
         return Results.NotFound(new { error = "Pensamiento no encontrado." });
     }
 
@@ -709,6 +981,12 @@ app.MapPost("/api/quotes/{quoteId:int}/like", async (
         });
 
         await db.SaveChangesAsync(cancellationToken);
+
+        telemetry.TrackEvent("quote.like.added", new Dictionary<string, string>
+        {
+            ["user_id"] = userId.ToString(),
+            ["quote_id"] = quoteId.ToString()
+        });
     }
 
     return Results.Ok(ToQuoteResponse(quote, userId));
@@ -718,6 +996,7 @@ app.MapDelete("/api/quotes/{quoteId:int}/like", async (
     int quoteId,
     ClaimsPrincipal principal,
     QuotesDbContext db,
+    TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
     var userId = GetUserId(principal);
@@ -731,6 +1010,12 @@ app.MapDelete("/api/quotes/{quoteId:int}/like", async (
     {
         db.QuoteLikes.Remove(like);
         await db.SaveChangesAsync(cancellationToken);
+
+        telemetry.TrackEvent("quote.like.removed", new Dictionary<string, string>
+        {
+            ["user_id"] = userId.ToString(),
+            ["quote_id"] = quoteId.ToString()
+        });
     }
 
     var quote = await db.Quotes

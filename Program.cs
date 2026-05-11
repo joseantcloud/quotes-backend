@@ -21,8 +21,11 @@ EnvFileLoader.Load();
 
 var builder = WebApplication.CreateBuilder(args);
 
+var startupIssues = new List<StartupIssue>();
+
 var appConfigConnectionString = builder.Configuration["AZURE_APP_CONFIG_CONNECTION_STRING"];
 var appConfigEndpoint = builder.Configuration["AZURE_APP_CONFIG_ENDPOINT"];
+var appConfigurationEnabled = false;
 
 if (!string.IsNullOrWhiteSpace(appConfigConnectionString)
     && appConfigConnectionString.StartsWith("https://", StringComparison.OrdinalIgnoreCase)
@@ -51,6 +54,8 @@ try
                     featureFlags.SetRefreshInterval(TimeSpan.FromSeconds(featureFlagRefreshSeconds));
                 });
         });
+
+        appConfigurationEnabled = true;
     }
     else if (!string.IsNullOrWhiteSpace(appConfigEndpoint))
     {
@@ -63,10 +68,18 @@ try
                     featureFlags.SetRefreshInterval(TimeSpan.FromSeconds(featureFlagRefreshSeconds));
                 });
         });
+
+        appConfigurationEnabled = true;
     }
 }
 catch (Exception ex)
 {
+    startupIssues.Add(new StartupIssue(
+        "AZURE_APP_CONFIG_CONNECTION_STRING",
+        "Azure App Configuration could not be loaded and feature flags will fall back to environment variables.",
+        ex,
+        false));
+
     Console.WriteLine($"Azure App Configuration was not loaded: {ex.Message}");
 }
 
@@ -210,6 +223,63 @@ else
 
 var app = builder.Build();
 
+var telemetryClient = app.Services.GetRequiredService<TelemetryClient>();
+
+ValidateStartupSetting(
+    startupIssues,
+    "AZURE_SQL_CONNECTION_STRING",
+    app.Configuration["AZURE_SQL_CONNECTION_STRING"],
+    fatal: true,
+    "AZURE_SQL_CONNECTION_STRING is required. This application uses Azure SQL only.");
+
+ValidateStartupSetting(
+    startupIssues,
+    "JWT_SECRET_KEY",
+    app.Configuration["JWT_SECRET_KEY"],
+    fatal: true,
+    "JWT_SECRET_KEY is required.");
+
+ValidateStartupSetting(
+    startupIssues,
+    "ADMIN_SETUP_KEY",
+    app.Configuration["ADMIN_SETUP_KEY"],
+    fatal: false,
+    "ADMIN_SETUP_KEY is not configured.");
+
+ValidateStartupSetting(
+    startupIssues,
+    "AZURE_STORAGE_CONNECTION_STRING",
+    app.Configuration["AZURE_STORAGE_CONNECTION_STRING"],
+    fatal: false,
+    "AZURE_STORAGE_CONNECTION_STRING is not configured.");
+
+foreach (var issue in startupIssues)
+{
+    telemetryClient.TrackException(issue.Exception, new Dictionary<string, string>
+    {
+        ["setting"] = issue.Setting,
+        ["fatal"] = issue.Fatal.ToString(),
+        ["source"] = "startup"
+    });
+
+    app.Logger.LogError(
+        issue.Exception,
+        "startup.config.issue setting={Setting} fatal={Fatal} message={Message}",
+        issue.Setting,
+        issue.Fatal,
+        issue.Message);
+}
+
+if (startupIssues.Count > 0)
+{
+    telemetryClient.Flush();
+
+    if (startupIssues.Any(issue => issue.Fatal))
+    {
+        throw new InvalidOperationException("Startup configuration is invalid. Check the logged configuration issues.");
+    }
+}
+
 app.Logger.LogInformation("Application configured to use Azure SQL only.");
 app.Logger.LogInformation("Automatic database initialization is disabled during startup.");
 
@@ -231,7 +301,10 @@ app.UseStaticFiles(new StaticFileOptions
     ContentTypeProvider = new FileExtensionContentTypeProvider()
 });
 
-app.UseAzureAppConfiguration();
+if (appConfigurationEnabled)
+{
+    app.UseAzureAppConfiguration();
+}
 
 app.Use(async (context, next) =>
 {
@@ -1068,3 +1141,24 @@ static QuoteResponse ToQuoteResponse(Quote quote, int? currentUserId)
         LikedByMe: currentUserId.HasValue
             && quote.Likes.Any(x => x.UserId == currentUserId.Value));
 }
+
+static void ValidateStartupSetting(
+    List<StartupIssue> startupIssues,
+    string settingName,
+    string? value,
+    bool fatal,
+    string message)
+{
+    if (!string.IsNullOrWhiteSpace(value))
+    {
+        return;
+    }
+
+    startupIssues.Add(new StartupIssue(
+        settingName,
+        message,
+        new InvalidOperationException(message),
+        fatal));
+}
+
+record StartupIssue(string Setting, string Message, Exception Exception, bool Fatal);

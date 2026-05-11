@@ -2,10 +2,8 @@ trigger:
   branches:
     include:
       - main
-  paths:
-    include:
-      - quotes-backend/**
-      - azure-pipelines-backend.yml
+
+pr: none
 
 pool:
   name: Default
@@ -36,47 +34,75 @@ stages:
             displayName: Checkout repository
 
           - powershell: |
-              Write-Host "====================================="
-              Write-Host "DEBUG - Working directory"
-              Write-Host "====================================="
+              Write-Host "============================================================"
+              Write-Host "STEP 1 - BUILD CONTEXT"
+              Write-Host "============================================================"
+              Write-Host "Repository root:"
               Write-Host "$(System.DefaultWorkingDirectory)"
-
               Write-Host ""
-              Write-Host "====================================="
-              Write-Host "DEBUG - Repository files"
-              Write-Host "====================================="
-              Get-ChildItem "$(System.DefaultWorkingDirectory)" -Recurse | Select-Object FullName
-
+              Write-Host "Agent name:"
+              Write-Host "$(Agent.Name)"
               Write-Host ""
-              Write-Host "====================================="
-              Write-Host "DEBUG - Searching .csproj files"
-              Write-Host "====================================="
-              Get-ChildItem "$(System.DefaultWorkingDirectory)" -Recurse -Filter *.csproj | ForEach-Object {
+              Write-Host "Agent OS:"
+              Write-Host "$(Agent.OS)"
+              Write-Host ""
+              Write-Host "Build configuration:"
+              Write-Host "$(buildConfiguration)"
+              Write-Host ""
+              Write-Host "Project search pattern:"
+              Write-Host "$(projectPath)"
+              Write-Host "============================================================"
+            displayName: Print build context
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 2 - SEARCHING .NET PROJECT FILES"
+              Write-Host "============================================================"
+
+              $projects = Get-ChildItem "$(System.DefaultWorkingDirectory)" -Recurse -Filter *.csproj
+
+              if ($projects.Count -eq 0) {
+                Write-Error "No .csproj files were found in the repository."
+                exit 1
+              }
+
+              Write-Host "Found .csproj files:"
+              $projects | ForEach-Object {
                 Write-Host $_.FullName
               }
+
+              Write-Host "============================================================"
             displayName: Debug project path
 
           - task: UseDotNet@2
-            displayName: Install .NET SDK
+            displayName: Install .NET SDK 10.x
             inputs:
               packageType: sdk
               version: '10.0.x'
 
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 3 - DOTNET VERSION"
+              Write-Host "============================================================"
+              dotnet --info
+              Write-Host "============================================================"
+            displayName: Print dotnet info
+
           - task: DotNetCoreCLI@2
-            displayName: Restore
+            displayName: Restore backend
             inputs:
               command: restore
               projects: '$(projectPath)'
 
           - task: DotNetCoreCLI@2
-            displayName: Build
+            displayName: Build backend
             inputs:
               command: build
               projects: '$(projectPath)'
               arguments: '--configuration $(buildConfiguration) --no-restore'
 
           - task: DotNetCoreCLI@2
-            displayName: Publish
+            displayName: Publish backend
             inputs:
               command: publish
               publishWebProjects: false
@@ -84,6 +110,19 @@ stages:
               arguments: '--configuration $(buildConfiguration) --output $(publishDirectory) --no-build'
               zipAfterPublish: false
               modifyOutputPath: false
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 4 - PUBLISH OUTPUT CONTENT"
+              Write-Host "============================================================"
+              Write-Host "Publish directory:"
+              Write-Host "$(publishDirectory)"
+              Write-Host ""
+              Get-ChildItem "$(publishDirectory)" -Recurse | ForEach-Object {
+                Write-Host $_.FullName
+              }
+              Write-Host "============================================================"
+            displayName: Inspect publish output
 
           - task: ArchiveFiles@2
             displayName: Create backend ZIP
@@ -93,6 +132,25 @@ stages:
               archiveType: zip
               archiveFile: '$(packagePath)'
               replaceExistingArchive: true
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 5 - BACKEND PACKAGE CREATED"
+              Write-Host "============================================================"
+              Write-Host "Package path:"
+              Write-Host "$(packagePath)"
+              Write-Host ""
+              if (Test-Path "$(packagePath)") {
+                $package = Get-Item "$(packagePath)"
+                Write-Host "Package size bytes:"
+                Write-Host $package.Length
+              }
+              else {
+                Write-Error "Backend package was not created."
+                exit 1
+              }
+              Write-Host "============================================================"
+            displayName: Inspect backend ZIP
 
           - publish: '$(packagePath)'
             displayName: Publish backend artifact
@@ -114,6 +172,102 @@ stages:
                   artifact: backend-drop
                   displayName: Download backend artifact
 
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 6 - DEPLOY CONTEXT"
+                    Write-Host "============================================================"
+                    Write-Host "Azure Service Connection:"
+                    Write-Host "$(azureServiceConnection)"
+                    Write-Host ""
+                    Write-Host "Resource Group:"
+                    Write-Host "$(resourceGroupName)"
+                    Write-Host ""
+                    Write-Host "Backend App Service:"
+                    Write-Host "$(webAppName)"
+                    Write-Host ""
+                    Write-Host "Backend Base URL:"
+                    Write-Host "$(backendBaseUrl)"
+                    Write-Host ""
+                    Write-Host "Frontend Base URL:"
+                    Write-Host "$(frontendBaseUrl)"
+                    Write-Host ""
+                    Write-Host "Environment:"
+                    Write-Host "$(environmentName)"
+                    Write-Host ""
+                    Write-Host "Artifact package:"
+                    Write-Host "$(Pipeline.Workspace)/backend-drop/backend.zip"
+                    Write-Host "============================================================"
+                  displayName: Print deploy context
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 7 - VALIDATING REQUIRED VARIABLES"
+                    Write-Host "============================================================"
+
+                    $requiredVariables = @{
+                      "azureServiceConnection" = "$(azureServiceConnection)"
+                      "resourceGroupName" = "$(resourceGroupName)"
+                      "webAppName" = "$(webAppName)"
+                      "backendBaseUrl" = "$(backendBaseUrl)"
+                      "frontendBaseUrl" = "$(frontendBaseUrl)"
+                      "environmentName" = "$(environmentName)"
+                      "photoStorageBackend" = "$(photoStorageBackend)"
+                      "storageContainerName" = "$(storageContainerName)"
+                      "maxPhotoMb" = "$(maxPhotoMb)"
+                      "logLevel" = "$(logLevel)"
+                    }
+
+                    foreach ($item in $requiredVariables.GetEnumerator()) {
+                      if ([string]::IsNullOrWhiteSpace($item.Value)) {
+                        Write-Error "$($item.Key) is empty."
+                        exit 1
+                      }
+
+                      Write-Host "$($item.Key): $($item.Value)"
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:JWT_SECRET_KEY)) {
+                      Write-Error "JWT_SECRET_KEY is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:ADMIN_SETUP_KEY)) {
+                      Write-Error "ADMIN_SETUP_KEY is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:AZURE_SQL_CONNECTION_STRING)) {
+                      Write-Error "AZURE_SQL_CONNECTION_STRING is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:AZURE_STORAGE_CONNECTION_STRING)) {
+                      Write-Error "AZURE_STORAGE_CONNECTION_STRING is empty."
+                      exit 1
+                    }
+
+                    Write-Host "JWT_SECRET_KEY: present, length $($env:JWT_SECRET_KEY.Length)"
+                    Write-Host "ADMIN_SETUP_KEY: present, length $($env:ADMIN_SETUP_KEY.Length)"
+                    Write-Host "AZURE_SQL_CONNECTION_STRING: present"
+                    Write-Host "AZURE_STORAGE_CONNECTION_STRING: present"
+
+                    if ([string]::IsNullOrWhiteSpace($env:AZURE_APP_CONFIG_CONNECTION_STRING)) {
+                      Write-Host "AZURE_APP_CONFIG_CONNECTION_STRING: empty or not configured. This is allowed only if you are not using Azure App Configuration."
+                    }
+                    else {
+                      Write-Host "AZURE_APP_CONFIG_CONNECTION_STRING: present"
+                    }
+
+                    Write-Host "Required variable validation completed successfully."
+                    Write-Host "============================================================"
+                  displayName: Validate deployment variables
+                  env:
+                    JWT_SECRET_KEY: $(JWT_SECRET_KEY)
+                    ADMIN_SETUP_KEY: $(ADMIN_SETUP_KEY)
+                    AZURE_SQL_CONNECTION_STRING: $(AZURE_SQL_CONNECTION_STRING)
+                    AZURE_STORAGE_CONNECTION_STRING: $(AZURE_STORAGE_CONNECTION_STRING)
+                    AZURE_APP_CONFIG_CONNECTION_STRING: $(AZURE_APP_CONFIG_CONNECTION_STRING)
+
                 - task: AzureWebApp@1
                   displayName: Deploy backend ZIP to Azure App Service
                   inputs:
@@ -122,6 +276,7 @@ stages:
                     appName: '$(webAppName)'
                     package: '$(Pipeline.Workspace)/backend-drop/backend.zip'
                     runtimeStack: 'DOTNETCORE|10.0'
+                    startUpCommand: 'dotnet AzureQuotes.Api.dll'
 
                 - task: AzureAppServiceSettings@1
                   displayName: Configure backend App Settings
@@ -147,13 +302,23 @@ stages:
                           "slotSetting": false
                         },
                         {
+                          "name": "WEBSITES_CONTAINER_START_TIME_LIMIT",
+                          "value": "600",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "WEBSITE_WARMUP_PATH",
+                          "value": "/health",
+                          "slotSetting": false
+                        },
+                        {
                           "name": "ENVIRONMENT",
                           "value": "production",
                           "slotSetting": false
                         },
                         {
                           "name": "FRONTEND_BASE_URL",
-                          "value": "$(frontendBaseUrl)",
+                          "value": "$(frontendBaseUrl),$(backendBaseUrl)",
                           "slotSetting": false
                         },
                         {
@@ -167,8 +332,18 @@ stages:
                           "slotSetting": false
                         },
                         {
+                          "name": "ADMIN_SETUP_KEY",
+                          "value": "$(ADMIN_SETUP_KEY)",
+                          "slotSetting": false
+                        },
+                        {
                           "name": "AZURE_SQL_CONNECTION_STRING",
                           "value": "$(AZURE_SQL_CONNECTION_STRING)",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "AZURE_APP_CONFIG_CONNECTION_STRING",
+                          "value": "$(AZURE_APP_CONFIG_CONNECTION_STRING)",
                           "slotSetting": false
                         },
                         {
@@ -215,5 +390,158 @@ stages:
                           "name": "FEATURE_MAINTENANCEMODE_ENABLED",
                           "value": "false",
                           "slotSetting": false
+                        },
+                        {
+                          "name": "ENABLE_ORYX_BUILD",
+                          "value": "false",
+                          "slotSetting": false
+                        },
+                        {
+                          "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+                          "value": "false",
+                          "slotSetting": false
                         }
                       ]
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 8 - APP SETTINGS CONFIGURED"
+                    Write-Host "============================================================"
+                    Write-Host "The pipeline configured the following runtime settings:"
+                    Write-Host "- DOTNET_ENVIRONMENT"
+                    Write-Host "- ASPNETCORE_URLS"
+                    Write-Host "- WEBSITES_PORT"
+                    Write-Host "- WEBSITES_CONTAINER_START_TIME_LIMIT"
+                    Write-Host "- WEBSITE_WARMUP_PATH"
+                    Write-Host "- ENVIRONMENT"
+                    Write-Host "- FRONTEND_BASE_URL"
+                    Write-Host "- BACKEND_BASE_URL"
+                    Write-Host "- JWT_SECRET_KEY"
+                    Write-Host "- ADMIN_SETUP_KEY"
+                    Write-Host "- AZURE_SQL_CONNECTION_STRING"
+                    Write-Host "- AZURE_APP_CONFIG_CONNECTION_STRING"
+                    Write-Host "- PHOTO_STORAGE_BACKEND"
+                    Write-Host "- AZURE_STORAGE_CONNECTION_STRING"
+                    Write-Host "- AZURE_STORAGE_CONTAINER_NAME"
+                    Write-Host "- MAX_PHOTO_MB"
+                    Write-Host "- LOG_LEVEL"
+                    Write-Host "- FEATURE flags"
+                    Write-Host "- ENABLE_ORYX_BUILD=false"
+                    Write-Host "- SCM_DO_BUILD_DURING_DEPLOYMENT=false"
+                    Write-Host "============================================================"
+                  displayName: Explain configured App Settings
+
+                - task: AzureAppServiceManage@0
+                  displayName: Restart backend App Service
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    Action: 'Restart Azure App Service'
+                    WebAppName: '$(webAppName)'
+                    ResourceGroupName: '$(resourceGroupName)'
+
+                - powershell: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "============================================================"
+                    Write-Host "STEP 9 - WAITING FOR BACKEND HEALTH"
+                    Write-Host "============================================================"
+
+                    $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
+                    $healthUrl = "$backendBaseUrl/health"
+
+                    Write-Host "Health URL:"
+                    Write-Host $healthUrl
+
+                    $maxAttempts = 30
+                    $delaySeconds = 10
+
+                    for ($i = 1; $i -le $maxAttempts; $i++) {
+                      Write-Host "------------------------------------------------------------"
+                      Write-Host "Health attempt $i of $maxAttempts"
+
+                      try {
+                        $response = Invoke-WebRequest `
+                          -Method Get `
+                          -Uri $healthUrl `
+                          -TimeoutSec 20 `
+                          -UseBasicParsing
+
+                        Write-Host "HTTP status code:"
+                        Write-Host $response.StatusCode
+
+                        Write-Host "Response body:"
+                        Write-Host $response.Content
+
+                        if ($response.StatusCode -eq 200) {
+                          Write-Host "Backend is healthy."
+                          Write-Host "============================================================"
+                          exit 0
+                        }
+                      }
+                      catch {
+                        Write-Host "Health attempt failed."
+                        Write-Host $_.Exception.Message
+                      }
+
+                      Write-Host "Waiting $delaySeconds seconds..."
+                      Start-Sleep -Seconds $delaySeconds
+                    }
+
+                    Write-Error "Backend did not become healthy in time."
+                    exit 1
+                  displayName: Validate backend health
+
+                - powershell: |
+                    $ErrorActionPreference = "Stop"
+
+                    Write-Host "============================================================"
+                    Write-Host "STEP 10 - CHECKING DB HEALTH ENDPOINT"
+                    Write-Host "============================================================"
+
+                    $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
+                    $dbHealthUrl = "$backendBaseUrl/health/db"
+
+                    Write-Host "DB Health URL:"
+                    Write-Host $dbHealthUrl
+
+                    try {
+                      $response = Invoke-WebRequest `
+                        -Method Get `
+                        -Uri $dbHealthUrl `
+                        -TimeoutSec 90 `
+                        -UseBasicParsing
+
+                      Write-Host "HTTP status code:"
+                      Write-Host $response.StatusCode
+
+                      Write-Host "Response body:"
+                      Write-Host $response.Content
+
+                      Write-Host "DB health endpoint responded successfully."
+                    }
+                    catch {
+                      Write-Host "DB health endpoint failed."
+                      Write-Host "This does not necessarily mean the deployment failed, but Azure SQL must be reviewed."
+                      Write-Host $_.Exception.Message
+                    }
+
+                    Write-Host "============================================================"
+                  displayName: Check database health after deploy
+                  continueOnError: true
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "BACKEND PIPELINE COMPLETED"
+                    Write-Host "============================================================"
+                    Write-Host "Backend deployed to:"
+                    Write-Host "$(backendBaseUrl)"
+                    Write-Host ""
+                    Write-Host "Next step:"
+                    Write-Host "Run azure-pipelines-create-schema.yml to initialize Users, Quotes and QuoteLikes."
+                    Write-Host ""
+                    Write-Host "Why?"
+                    Write-Host "The backend deployment configures ADMIN_SETUP_KEY in App Service."
+                    Write-Host "The create-schema pipeline sends the same key using X-Setup-Key."
+                    Write-Host "Then the backend executes Entity Framework EnsureCreatedAsync()."
+                    Write-Host "============================================================"
+                  displayName: Print final deployment summary

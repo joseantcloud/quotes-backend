@@ -1,8 +1,8 @@
 {
   "version": 2,
-  "dgSpecHash": "4b4r7owl5yU=",
+  "dgSpecHash": "HGxxMP5yEiw=",
   "success": true,
-  "projectFilePath": "C:\\Users\\josea\\Downloads\\azure-devops-quotes-course-complete\\azure-devops-quotes-course\\quotes-backend\\AzureQuotes.Api.csproj",
+  "projectFilePath": "C:\\Users\\josea\\Desktop\\LiveDomain\\quotes-backend\\quotes-backend\\AzureQuotes.Api.csproj",
   "expectedPackageFiles": [
     "C:\\Users\\josea\\.nuget\\packages\\azure.core\\1.53.0\\azure.core.1.53.0.nupkg.sha512",
     "C:\\Users\\josea\\.nuget\\packages\\azure.data.appconfiguration\\1.8.0\\azure.data.appconfiguration.1.8.0.nupkg.sha512",
@@ -75,9 +75,9 @@
       "code": "NU1510",
       "level": "Warning",
       "message": "PackageReference Microsoft.Extensions.Identity.Core will not be pruned. Consider removing this package from your dependencies, as it is likely unnecessary.",
-      "projectPath": "C:\\Users\\josea\\Downloads\\azure-devops-quotes-course-complete\\azure-devops-quotes-course\\quotes-backend\\AzureQuotes.Api.csproj",
+      "projectPath": "C:\\Users\\josea\\Desktop\\LiveDomain\\quotes-backend\\quotes-backend\\AzureQuotes.Api.csproj",
       "warningLevel": 1,
-      "filePath": "C:\\Users\\josea\\Downloads\\azure-devops-quotes-course-complete\\azure-devops-quotes-course\\quotes-backend\\AzureQuotes.Api.csproj",
+      "filePath": "C:\\Users\\josea\\Desktop\\LiveDomain\\quotes-backend\\quotes-backend\\AzureQuotes.Api.csproj",
       "libraryId": "Microsoft.Extensions.Identity.Core",
       "targetGraphs": [
         "net10.0"

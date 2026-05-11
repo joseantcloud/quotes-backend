@@ -13,7 +13,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("AzureQuotes.Api")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+67fbd416731a8868f0ce35225489188c600a8729")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b718a950cd67193194be2d4941e1190705e27e33")]
 [assembly: System.Reflection.AssemblyProductAttribute("AzureQuotes.Api")]
 [assembly: System.Reflection.AssemblyTitleAttribute("AzureQuotes.Api")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]

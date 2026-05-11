@@ -51,7 +51,7 @@ public sealed class AzureBlobPhotoStorageService(IConfiguration configuration) :
             var accountUrl = configuration["AZURE_STORAGE_ACCOUNT_URL"];
             if (string.IsNullOrWhiteSpace(accountUrl))
             {
-                throw new InvalidOperationException("Configura AZURE_STORAGE_CONNECTION_STRING o AZURE_STORAGE_ACCOUNT_URL.");
+                throw new InvalidOperationException("Configure AZURE_STORAGE_CONNECTION_STRING or AZURE_STORAGE_ACCOUNT_URL.");
             }
 
             container = new BlobServiceClient(new Uri(accountUrl), new DefaultAzureCredential()).GetBlobContainerClient(containerName);

@@ -17,48 +17,164 @@ stages:
           - checkout: none
 
           - powershell: |
-              Write-Host "Validating required variables..."
+              Write-Host "============================================================"
+              Write-Host "STEP 1 - PIPELINE CONTEXT"
+              Write-Host "============================================================"
+              Write-Host "Pipeline name      : $(Build.DefinitionName)"
+              Write-Host "Build number       : $(Build.BuildNumber)"
+              Write-Host "Agent name         : $(Agent.Name)"
+              Write-Host "Agent OS           : $(Agent.OS)"
+              Write-Host "Job name           : $(System.JobDisplayName)"
+              Write-Host "Stage name         : $(System.StageDisplayName)"
+              Write-Host "Collection URI     : $(System.CollectionUri)"
+              Write-Host "Team project       : $(System.TeamProject)"
+              Write-Host "============================================================"
+            displayName: Print pipeline context
 
-              if ([string]::IsNullOrWhiteSpace("$(backendBaseUrl)")) {
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 2 - VALIDATING NON-SECRET VARIABLES"
+              Write-Host "============================================================"
+
+              $backendBaseUrl = "$(backendBaseUrl)"
+              $environmentName = "$(environmentName)"
+
+              Write-Host "backendBaseUrl     : $backendBaseUrl"
+              Write-Host "environmentName    : $environmentName"
+
+              if ([string]::IsNullOrWhiteSpace($backendBaseUrl)) {
                 Write-Error "backendBaseUrl is required in vars-backend."
                 exit 1
               }
 
-              if ([string]::IsNullOrWhiteSpace("$(ADMIN_SETUP_KEY)")) {
-                Write-Error "ADMIN_SETUP_KEY is required in vars-backend."
+              if ([string]::IsNullOrWhiteSpace($environmentName)) {
+                Write-Error "environmentName is required in vars-backend."
                 exit 1
               }
 
-              Write-Host "Required variables are present."
-            displayName: Validate variables
+              if ($backendBaseUrl -notmatch "^https://") {
+                Write-Warning "backendBaseUrl does not start with https://. Current value: $backendBaseUrl"
+              }
+
+              Write-Host "Non-secret variables validation completed successfully."
+              Write-Host "============================================================"
+            displayName: Validate non-secret variables
 
           - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 3 - VALIDATING SECRET VARIABLES"
+              Write-Host "============================================================"
+
+              if ([string]::IsNullOrWhiteSpace($env:ADMIN_SETUP_KEY)) {
+                Write-Error "ADMIN_SETUP_KEY is empty. Check vars-backend and make sure it is mapped as env variable."
+                exit 1
+              }
+
+              Write-Host "ADMIN_SETUP_KEY is present."
+              Write-Host "ADMIN_SETUP_KEY length: $($env:ADMIN_SETUP_KEY.Length)"
+              Write-Host "Secret values are not printed for security reasons."
+              Write-Host "Secret variables validation completed successfully."
+              Write-Host "============================================================"
+            displayName: Validate secret variables
+            env:
+              ADMIN_SETUP_KEY: $(ADMIN_SETUP_KEY)
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 4 - NORMALIZING URLS"
+              Write-Host "============================================================"
+
               $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
               $healthUrl = "$backendBaseUrl/health"
+              $dbHealthUrl = "$backendBaseUrl/health/db"
+              $setupUrl = "$backendBaseUrl/api/admin/database/ensure-created"
+              $quotesUrl = "$backendBaseUrl/api/quotes?scope=feed"
 
-              Write-Host "Waiting for backend health endpoint..."
-              Write-Host "Health URL: $healthUrl"
+              Write-Host "Backend Base URL   : $backendBaseUrl"
+              Write-Host "Health URL         : $healthUrl"
+              Write-Host "DB Health URL      : $dbHealthUrl"
+              Write-Host "Setup URL          : $setupUrl"
+              Write-Host "Quotes URL         : $quotesUrl"
 
+              Write-Host "##vso[task.setvariable variable=NormalizedBackendBaseUrl]$backendBaseUrl"
+              Write-Host "##vso[task.setvariable variable=HealthUrl]$healthUrl"
+              Write-Host "##vso[task.setvariable variable=DbHealthUrl]$dbHealthUrl"
+              Write-Host "##vso[task.setvariable variable=SetupUrl]$setupUrl"
+              Write-Host "##vso[task.setvariable variable=QuotesUrl]$quotesUrl"
+
+              Write-Host "URL normalization completed successfully."
+              Write-Host "============================================================"
+            displayName: Normalize endpoint URLs
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 5 - WAITING FOR BACKEND /health"
+              Write-Host "============================================================"
+
+              $healthUrl = "$(HealthUrl)"
               $maxAttempts = 30
               $delaySeconds = 10
 
+              Write-Host "Health endpoint    : $healthUrl"
+              Write-Host "Max attempts       : $maxAttempts"
+              Write-Host "Delay seconds      : $delaySeconds"
+
               for ($i = 1; $i -le $maxAttempts; $i++) {
+                Write-Host "------------------------------------------------------------"
+                Write-Host "Health attempt $i of $maxAttempts"
+                Write-Host "Calling: GET $healthUrl"
+
                 try {
-                  $response = Invoke-RestMethod `
+                  $response = Invoke-WebRequest `
                     -Method Get `
                     -Uri $healthUrl `
-                    -TimeoutSec 15
+                    -TimeoutSec 20 `
+                    -UseBasicParsing
 
-                  Write-Host "Backend is healthy."
-                  Write-Host "Status: $($response.status)"
-                  Write-Host "Database: $($response.database)"
-                  exit 0
+                  Write-Host "HTTP status code   : $($response.StatusCode)"
+                  Write-Host "Response body      : $($response.Content)"
+
+                  if ($response.StatusCode -eq 200) {
+                    Write-Host "Backend is healthy."
+                    Write-Host "============================================================"
+                    exit 0
+                  }
+
+                  Write-Host "Backend responded but status was not 200."
                 }
                 catch {
-                  Write-Host "Attempt $i/$maxAttempts failed."
-                  Write-Host $_.Exception.Message
-                  Start-Sleep -Seconds $delaySeconds
+                  Write-Host "Health attempt failed."
+
+                  if ($_.Exception.Response -ne $null) {
+                    $statusCode = [int]$_.Exception.Response.StatusCode
+                    Write-Host "HTTP status code   : $statusCode"
+
+                    try {
+                      $stream = $_.Exception.Response.GetResponseStream()
+                      $reader = New-Object System.IO.StreamReader($stream)
+                      $body = $reader.ReadToEnd()
+                      Write-Host "Response body      : $body"
+                    }
+                    catch {
+                      Write-Host "Could not read error response body."
+                    }
+                  }
+                  else {
+                    Write-Host "No HTTP response received."
+                    Write-Host "Exception message  : $($_.Exception.Message)"
+                  }
                 }
+
+                Write-Host "Waiting $delaySeconds seconds before next attempt..."
+                Start-Sleep -Seconds $delaySeconds
               }
 
               Write-Error "Backend did not become healthy in time."
@@ -66,55 +182,141 @@ stages:
             displayName: Wait for backend health
 
           - powershell: |
-              $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
-              $dbHealthUrl = "$backendBaseUrl/health/db"
+              $ErrorActionPreference = "Stop"
 
-              Write-Host "Checking Azure SQL connectivity..."
-              Write-Host "DB Health URL: $dbHealthUrl"
+              Write-Host "============================================================"
+              Write-Host "STEP 6 - CHECKING AZURE SQL CONNECTIVITY"
+              Write-Host "============================================================"
+
+              $dbHealthUrl = "$(DbHealthUrl)"
+
+              Write-Host "DB health endpoint : $dbHealthUrl"
+              Write-Host "Calling: GET $dbHealthUrl"
 
               try {
-                $response = Invoke-RestMethod `
+                $response = Invoke-WebRequest `
                   -Method Get `
                   -Uri $dbHealthUrl `
-                  -TimeoutSec 60
+                  -TimeoutSec 90 `
+                  -UseBasicParsing
 
-                Write-Host "Azure SQL connectivity check completed."
-                Write-Host "Status: $($response.status)"
-                Write-Host "Provider: $($response.provider)"
+                Write-Host "HTTP status code   : $($response.StatusCode)"
+                Write-Host "Response body      : $($response.Content)"
+
+                if ($response.StatusCode -ne 200) {
+                  Write-Error "DB health endpoint did not return 200."
+                  exit 1
+                }
+
+                Write-Host "Azure SQL connectivity check completed successfully."
+                Write-Host "============================================================"
               }
               catch {
-                Write-Error "Azure SQL connectivity check failed."
-                Write-Error $_.Exception.Message
+                Write-Host "Azure SQL connectivity check failed."
+
+                if ($_.Exception.Response -ne $null) {
+                  $statusCode = [int]$_.Exception.Response.StatusCode
+                  Write-Host "HTTP status code   : $statusCode"
+
+                  try {
+                    $stream = $_.Exception.Response.GetResponseStream()
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    Write-Host "Response body      : $body"
+                  }
+                  catch {
+                    Write-Host "Could not read error response body."
+                  }
+                }
+                else {
+                  Write-Host "No HTTP response received."
+                  Write-Host "Exception message  : $($_.Exception.Message)"
+                }
+
+                Write-Error "Azure SQL connectivity validation failed."
                 exit 1
               }
             displayName: Check Azure SQL connectivity
 
           - powershell: |
-              $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
-              $setupUrl = "$backendBaseUrl/api/admin/database/ensure-created"
+              $ErrorActionPreference = "Stop"
 
-              Write-Host "Creating Azure SQL schema..."
-              Write-Host "Setup URL: $setupUrl"
+              Write-Host "============================================================"
+              Write-Host "STEP 7 - CREATING AZURE SQL SCHEMA"
+              Write-Host "============================================================"
+
+              $setupUrl = "$(SetupUrl)"
+
+              Write-Host "Setup endpoint     : $setupUrl"
+              Write-Host "Calling: POST $setupUrl"
+
+              if ([string]::IsNullOrWhiteSpace($env:ADMIN_SETUP_KEY)) {
+                Write-Error "ADMIN_SETUP_KEY is empty inside Create schema step."
+                exit 1
+              }
 
               $headers = @{
                 "X-Setup-Key" = $env:ADMIN_SETUP_KEY
               }
 
+              Write-Host "Header X-Setup-Key : present"
+              Write-Host "Timeout seconds    : 180"
+
               try {
-                $response = Invoke-RestMethod `
+                $response = Invoke-WebRequest `
                   -Method Post `
                   -Uri $setupUrl `
                   -Headers $headers `
-                  -TimeoutSec 120
+                  -TimeoutSec 180 `
+                  -UseBasicParsing
 
-                Write-Host "Schema initialization completed."
-                Write-Host "Status: $($response.status)"
-                Write-Host "Provider: $($response.provider)"
-                Write-Host "Timestamp: $($response.timestamp)"
+                Write-Host "HTTP status code   : $($response.StatusCode)"
+                Write-Host "Response body      : $($response.Content)"
+
+                if ($response.StatusCode -lt 200 -or $response.StatusCode -ge 300) {
+                  Write-Error "Schema endpoint returned non-success status code: $($response.StatusCode)"
+                  exit 1
+                }
+
+                Write-Host "Schema initialization completed successfully."
+                Write-Host "Expected tables: Users, Quotes, QuoteLikes."
+                Write-Host "============================================================"
               }
               catch {
+                Write-Host "Schema initialization failed."
+
+                if ($_.Exception.Response -ne $null) {
+                  $statusCode = [int]$_.Exception.Response.StatusCode
+                  Write-Host "HTTP status code   : $statusCode"
+
+                  try {
+                    $stream = $_.Exception.Response.GetResponseStream()
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    Write-Host "Response body      : $body"
+                  }
+                  catch {
+                    Write-Host "Could not read error response body."
+                  }
+
+                  if ($statusCode -eq 401) {
+                    Write-Host "Diagnosis: unauthorized. ADMIN_SETUP_KEY in vars-backend probably does not match ADMIN_SETUP_KEY in App Service."
+                  }
+
+                  if ($statusCode -eq 404) {
+                    Write-Host "Diagnosis: endpoint not found. The deployed backend probably does not contain /api/admin/database/ensure-created."
+                  }
+
+                  if ($statusCode -eq 500) {
+                    Write-Host "Diagnosis: backend error. Check App Service Log Stream for SQL or configuration exception."
+                  }
+                }
+                else {
+                  Write-Host "No HTTP response received."
+                  Write-Host "Exception message  : $($_.Exception.Message)"
+                }
+
                 Write-Error "Schema initialization failed."
-                Write-Error $_.Exception.Message
                 exit 1
               }
             displayName: Create schema in Azure SQL
@@ -122,25 +324,137 @@ stages:
               ADMIN_SETUP_KEY: $(ADMIN_SETUP_KEY)
 
           - powershell: |
-              $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
-              $dbHealthUrl = "$backendBaseUrl/health/db"
+              $ErrorActionPreference = "Stop"
 
-              Write-Host "Running final Azure SQL validation..."
-              Write-Host "DB Health URL: $dbHealthUrl"
+              Write-Host "============================================================"
+              Write-Host "STEP 8 - FINAL DB HEALTH VALIDATION"
+              Write-Host "============================================================"
+
+              $dbHealthUrl = "$(DbHealthUrl)"
+
+              Write-Host "DB health endpoint : $dbHealthUrl"
+              Write-Host "Calling: GET $dbHealthUrl"
 
               try {
-                $response = Invoke-RestMethod `
+                $response = Invoke-WebRequest `
                   -Method Get `
                   -Uri $dbHealthUrl `
-                  -TimeoutSec 60
+                  -TimeoutSec 90 `
+                  -UseBasicParsing
 
-                Write-Host "Final database validation completed."
-                Write-Host "Status: $($response.status)"
-                Write-Host "Provider: $($response.provider)"
+                Write-Host "HTTP status code   : $($response.StatusCode)"
+                Write-Host "Response body      : $($response.Content)"
+
+                if ($response.StatusCode -ne 200) {
+                  Write-Error "Final DB health validation did not return 200."
+                  exit 1
+                }
+
+                Write-Host "Final DB health validation completed successfully."
+                Write-Host "============================================================"
               }
               catch {
-                Write-Error "Final database validation failed."
-                Write-Error $_.Exception.Message
+                Write-Host "Final DB health validation failed."
+
+                if ($_.Exception.Response -ne $null) {
+                  $statusCode = [int]$_.Exception.Response.StatusCode
+                  Write-Host "HTTP status code   : $statusCode"
+
+                  try {
+                    $stream = $_.Exception.Response.GetResponseStream()
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    Write-Host "Response body      : $body"
+                  }
+                  catch {
+                    Write-Host "Could not read error response body."
+                  }
+                }
+                else {
+                  Write-Host "No HTTP response received."
+                  Write-Host "Exception message  : $($_.Exception.Message)"
+                }
+
+                Write-Error "Final DB health validation failed."
                 exit 1
               }
             displayName: Final database validation
+
+          - powershell: |
+              $ErrorActionPreference = "Stop"
+
+              Write-Host "============================================================"
+              Write-Host "STEP 9 - VALIDATING APPLICATION QUERY AFTER SCHEMA CREATION"
+              Write-Host "============================================================"
+
+              $quotesUrl = "$(QuotesUrl)"
+
+              Write-Host "Quotes endpoint    : $quotesUrl"
+              Write-Host "Calling: GET $quotesUrl"
+
+              try {
+                $response = Invoke-WebRequest `
+                  -Method Get `
+                  -Uri $quotesUrl `
+                  -TimeoutSec 90 `
+                  -UseBasicParsing
+
+                Write-Host "HTTP status code   : $($response.StatusCode)"
+                Write-Host "Response body      : $($response.Content)"
+
+                if ($response.StatusCode -ne 200) {
+                  Write-Error "Quotes endpoint did not return 200."
+                  exit 1
+                }
+
+                Write-Host "Application query validation completed successfully."
+                Write-Host "If the response is [], that is OK. It only means there are no public quotes yet."
+                Write-Host "============================================================"
+              }
+              catch {
+                Write-Host "Application query validation failed."
+
+                if ($_.Exception.Response -ne $null) {
+                  $statusCode = [int]$_.Exception.Response.StatusCode
+                  Write-Host "HTTP status code   : $statusCode"
+
+                  try {
+                    $stream = $_.Exception.Response.GetResponseStream()
+                    $reader = New-Object System.IO.StreamReader($stream)
+                    $body = $reader.ReadToEnd()
+                    Write-Host "Response body      : $body"
+                  }
+                  catch {
+                    Write-Host "Could not read error response body."
+                  }
+                }
+                else {
+                  Write-Host "No HTTP response received."
+                  Write-Host "Exception message  : $($_.Exception.Message)"
+                }
+
+                Write-Error "Application query validation failed."
+                exit 1
+              }
+            displayName: Validate quotes endpoint after schema creation
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "DATABASE SCHEMA PIPELINE COMPLETED"
+              Write-Host "============================================================"
+              Write-Host "Backend URL        : $(NormalizedBackendBaseUrl)"
+              Write-Host "Health endpoint    : $(HealthUrl)"
+              Write-Host "DB health endpoint : $(DbHealthUrl)"
+              Write-Host "Quotes endpoint    : $(QuotesUrl)"
+              Write-Host ""
+              Write-Host "What this pipeline validated:"
+              Write-Host "1. Backend App Service is alive."
+              Write-Host "2. Backend can connect to Azure SQL."
+              Write-Host "3. Backend accepted the setup key."
+              Write-Host "4. Entity Framework EnsureCreated was executed."
+              Write-Host "5. Application query endpoint works after schema creation."
+              Write-Host ""
+              Write-Host "Next tutorial step:"
+              Write-Host "Open frontend and register a user."
+              Write-Host "============================================================"
+            displayName: Print final tutorial summary

@@ -1,0 +1,146 @@
+trigger: none
+pr: none
+
+pool:
+  name: Default
+
+variables:
+  - group: vars-backend
+
+stages:
+  - stage: CreateDatabaseSchema
+    displayName: Create Azure SQL Schema
+    jobs:
+      - job: CreateSchema
+        displayName: Create schema through backend endpoint
+        steps:
+          - checkout: none
+
+          - powershell: |
+              Write-Host "Validating required variables..."
+
+              if ([string]::IsNullOrWhiteSpace("$(backendBaseUrl)")) {
+                Write-Error "backendBaseUrl is required in vars-backend."
+                exit 1
+              }
+
+              if ([string]::IsNullOrWhiteSpace("$(ADMIN_SETUP_KEY)")) {
+                Write-Error "ADMIN_SETUP_KEY is required in vars-backend."
+                exit 1
+              }
+
+              Write-Host "Required variables are present."
+            displayName: Validate variables
+
+          - powershell: |
+              $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
+              $healthUrl = "$backendBaseUrl/health"
+
+              Write-Host "Waiting for backend health endpoint..."
+              Write-Host "Health URL: $healthUrl"
+
+              $maxAttempts = 30
+              $delaySeconds = 10
+
+              for ($i = 1; $i -le $maxAttempts; $i++) {
+                try {
+                  $response = Invoke-RestMethod `
+                    -Method Get `
+                    -Uri $healthUrl `
+                    -TimeoutSec 15
+
+                  Write-Host "Backend is healthy."
+                  Write-Host "Status: $($response.status)"
+                  Write-Host "Database: $($response.database)"
+                  exit 0
+                }
+                catch {
+                  Write-Host "Attempt $i/$maxAttempts failed."
+                  Write-Host $_.Exception.Message
+                  Start-Sleep -Seconds $delaySeconds
+                }
+              }
+
+              Write-Error "Backend did not become healthy in time."
+              exit 1
+            displayName: Wait for backend health
+
+          - powershell: |
+              $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
+              $dbHealthUrl = "$backendBaseUrl/health/db"
+
+              Write-Host "Checking Azure SQL connectivity..."
+              Write-Host "DB Health URL: $dbHealthUrl"
+
+              try {
+                $response = Invoke-RestMethod `
+                  -Method Get `
+                  -Uri $dbHealthUrl `
+                  -TimeoutSec 60
+
+                Write-Host "Azure SQL connectivity check completed."
+                Write-Host "Status: $($response.status)"
+                Write-Host "Provider: $($response.provider)"
+              }
+              catch {
+                Write-Error "Azure SQL connectivity check failed."
+                Write-Error $_.Exception.Message
+                exit 1
+              }
+            displayName: Check Azure SQL connectivity
+
+          - powershell: |
+              $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
+              $setupUrl = "$backendBaseUrl/api/admin/database/ensure-created"
+
+              Write-Host "Creating Azure SQL schema..."
+              Write-Host "Setup URL: $setupUrl"
+
+              $headers = @{
+                "X-Setup-Key" = $env:ADMIN_SETUP_KEY
+              }
+
+              try {
+                $response = Invoke-RestMethod `
+                  -Method Post `
+                  -Uri $setupUrl `
+                  -Headers $headers `
+                  -TimeoutSec 120
+
+                Write-Host "Schema initialization completed."
+                Write-Host "Status: $($response.status)"
+                Write-Host "Provider: $($response.provider)"
+                Write-Host "Timestamp: $($response.timestamp)"
+              }
+              catch {
+                Write-Error "Schema initialization failed."
+                Write-Error $_.Exception.Message
+                exit 1
+              }
+            displayName: Create schema in Azure SQL
+            env:
+              ADMIN_SETUP_KEY: $(ADMIN_SETUP_KEY)
+
+          - powershell: |
+              $backendBaseUrl = "$(backendBaseUrl)".TrimEnd("/")
+              $dbHealthUrl = "$backendBaseUrl/health/db"
+
+              Write-Host "Running final Azure SQL validation..."
+              Write-Host "DB Health URL: $dbHealthUrl"
+
+              try {
+                $response = Invoke-RestMethod `
+                  -Method Get `
+                  -Uri $dbHealthUrl `
+                  -TimeoutSec 60
+
+                Write-Host "Final database validation completed."
+                Write-Host "Status: $($response.status)"
+                Write-Host "Provider: $($response.provider)"
+              }
+              catch {
+                Write-Error "Final database validation failed."
+                Write-Error $_.Exception.Message
+                exit 1
+              }
+            displayName: Final database validation

@@ -487,9 +487,16 @@ app.MapPost("/api/admin/database/ensure-created", async (
 
 app.MapGet("/apispec.json", () => Results.Redirect("/v1/apispec.json"));
 
-app.MapGet("/api/features", (FeatureFlagService features) =>
+app.MapGet("/api/features", (FeatureFlagService features, TelemetryClient telemetry) =>
 {
     var current = features.GetFeatures();
+
+    telemetry.TrackEvent("features.loaded", new Dictionary<string, string>
+    {
+        ["public_feed_enabled"] = current.PublicFeedEnabled.ToString(),
+        ["photo_upload_enabled"] = current.PhotoUploadEnabled.ToString(),
+        ["maintenance_mode_enabled"] = current.MaintenanceModeEnabled.ToString()
+    });
 
     app.Logger.LogInformation(
         "features.loaded public_feed_enabled={PublicFeedEnabled} photo_upload_enabled={PhotoUploadEnabled} maintenance_mode_enabled={MaintenanceModeEnabled}",

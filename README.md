@@ -298,6 +298,352 @@ Este pipeline:
 6. Configura `API_BASE_URL`.
 7. Reinicia el App Service frontend.
 
+## Creación de Recursos en Azure desde Cero
+
+Esta sección es **para principiantes** que nunca han usado Azure. Se explica cada concepto antes de usarlo.
+
+### Conceptos Previos Explicados
+
+#### ¿Qué es un Connection String?
+
+Un **connection string** es una texto que contiene la información necesaria para conectarse a una base de datos. Es como una "dirección + contraseña" combinada en un solo formato.
+
+**Ejemplo:**
+```
+Server=tcp:myserver.database.windows.net,1433;Initial Catalog=mydb;Persist Security Info=False;User ID=admin;Password=P@ssw0rd123;Encrypt=True;Connection Timeout=30;
+```
+
+En este ejemplo:
+- `myserver.database.windows.net` = dónde está la base de datos
+- `mydb` = nombre de la base de datos
+- `admin` = usuario
+- `P@ssw0rd123` = contraseña
+
+#### ¿Qué es un Feature Flag?
+
+Un **feature flag** es una variable que puedes cambiar **sin re-desplegar la aplicación**. Permite activar/desactivar funcionalidades en producción en tiempo real.
+
+**Ejemplo:**
+- `FEATURE_PHOTO_UPLOAD_ENABLED=false` desactiva fotos en producción
+- Luego cambias en Azure a `true` y ¡se activa sin re-desplegar!
+
+#### ¿Qué es Application Insights?
+
+**Application Insights** es el "guardabosques" de tu aplicación. Recoge:
+- Qué hace tu aplicación (requests HTTP)
+- Cuántos errores hay
+- Qué tan rápido responde
+- Dónde están los problemas
+
+### Paso 1: Crear Grupo De Recursos
+
+Un **grupo de recursos** es una carpeta en Azure donde pones todos tus recursos (base de datos, app service, storage, etc.).
+
+1. Ve a https://portal.azure.com
+2. Click en "Resource groups" (o busca "Resource groups" arriba)
+3. Click en "+ Create"
+4. Rellena:
+   - **Resource group name**: `rg-livedomain-prod` (o un nombre que prefieras)
+   - **Region**: `East US` o la más cercana a ti
+5. Click en "Review + create" → "Create"
+6. Espera a que diga "Deployment succeeded"
+
+### Paso 2: Crear Azure SQL Database
+
+La base de datos donde se guardan usuarios, quotes y likes.
+
+#### 2.1 Crear SQL Server
+
+1. En el portal, busca "SQL servers" y click
+2. Click en "+ Create"
+3. Rellena:
+   - **Resource group**: selecciona `rg-livedomain-prod`
+   - **Server name**: `sql-livedomain-prod` (debe ser único globalmente)
+   - **Location**: misma región que el resource group (ej. East US)
+   - **Administrator login**: `sqladmin` (usuario de administrador)
+   - **Password**: genera una contraseña fuerte, ej: `P@ssw0rd123!Azure2024` (guárdala en un lugar seguro)
+   - Confirma la contraseña
+
+4. Click en "Review + create" → "Create"
+5. Espera a que se complete
+
+#### 2.2 Crear Azure SQL Database
+
+1. Cuando termine, click en "Go to resource"
+2. En el lado izquierdo, busca "Databases" o click en "+ New database"
+3. Rellena:
+   - **Database name**: `quotes-db`
+   - **Compute + storage**: "Basic" está bien para desarrollo (es más barato)
+4. Click en "Create"
+5. Espera a que se complete
+
+#### 2.3 Abrir Firewall Para Desarrollo Local
+
+Para que tu computadora local se conecte:
+
+1. En SQL Server, ve a "Firewalls and virtual networks"
+2. Click en "+ Add your client IP address"
+3. Verás tu IP agregada automáticamente
+4. Click en "Save"
+
+#### 2.4 Obtener Connection String
+
+1. Ve a SQL Database ("quotes-db")
+2. Click en "Connection strings"
+3. Copia la que dice "ADO.NET" (no la ODBC ni JDBC)
+4. Reemplaza:
+   - `{your_username}` → `sqladmin`
+   - `{your_password}` → la contraseña que creaste (ej: `P@ssw0rd123!Azure2024`)
+
+Debe verse así:
+```
+Server=tcp:sql-livedomain-prod.database.windows.net,1433;Initial Catalog=quotes-db;Persist Security Info=False;User ID=sqladmin;Password=P@ssw0rd123!Azure2024;Encrypt=True;Connection Timeout=30;
+```
+
+**Guárdalo**, lo necesitarás después.
+
+### Paso 3: Crear Azure Storage Account (Blob Storage)
+
+Donde se guardan las fotos.
+
+1. Busca "Storage accounts" en el portal
+2. Click en "+ Create"
+3. Rellena:
+   - **Resource group**: `rg-livedomain-prod`
+   - **Storage account name**: `salivedomain` (solo letras, números, y debe ser único)
+   - **Region**: misma región que los otros
+   - **Performance**: "Standard"
+   - **Redundancy**: "Locally-redundant storage (LRS)" está bien
+4. Click en "Review + create" → "Create"
+
+#### 3.1 Crear Contenedor
+
+1. Cuando termine, click en "Go to resource"
+2. A la izquierda, click en "Containers"
+3. Click en "+ Container"
+4. Rellena:
+   - **Name**: `photos` (en minúsculas)
+   - **Public access level**: "Private"
+5. Click en "Create"
+
+#### 3.2 Obtener Connection String
+
+1. A la izquierda, click en "Access keys"
+2. Bajo "Storage account name", copia "Storage account name"
+3. Bajo "Key 1", copia la **"Connection string"** (larga, empieza con `DefaultEndpointsProtocol=...`)
+
+**Guárdalo**.
+
+### Paso 4: Crear Azure App Configuration
+
+Donde se guardan los feature flags.
+
+1. Busca "App Configuration" en el portal
+2. Click en "+ Create"
+3. Rellena:
+   - **Resource group**: `rg-livedomain-prod`
+   - **Name**: `appcfg-livedomain-prod`
+   - **Region**: misma región
+4. Click en "Review + create" → "Create"
+
+#### 4.1 Crear Connection String De App Configuration
+
+1. Cuando termine, click en "Go to resource"
+2. A la izquierda, click en "Access keys"
+3. Bajo "Primary key", copia "Connection String"
+
+**Guárdalo**.
+
+#### 4.2 Agregar Feature Flags (Opcional Para Ahora)
+
+Puedes saltarte esto por ahora. Lo harás en producción después de desplegar.
+
+### Paso 5: Crear Application Insights
+
+Para ver logs, errores y performance.
+
+1. Busca "Application Insights" en el portal
+2. Click en "+ Create"
+3. Rellena:
+   - **Name**: `appins-livedomain-prod`
+   - **Resource group**: `rg-livedomain-prod`
+   - **Region**: misma región
+   - **Resource Mode**: "Workspace-based" está bien
+4. Click en "Review + create" → "Create"
+
+#### 5.1 Obtener Instrumentation Key
+
+1. Cuando termine, click en "Go to resource"
+2. A la izquierda, click en "Overview"
+3. Copia el valor de "Instrumentation Key" (es un GUID, ej: `12345678-1234-1234-1234-123456789012`)
+
+**Guárdalo**.
+
+### Paso 6: Crear Azure App Service (Backend)
+
+Donde va a vivir la API.
+
+1. Busca "App Services" en el portal
+2. Click en "+ Create"
+3. Click en "Web App"
+4. Rellena:
+   - **Resource group**: `rg-livedomain-prod`
+   - **Name**: `app-backend-livedomain-prod` (debe ser único, será tu URL)
+   - **Runtime stack**: ".NET 10"
+   - **Operating System**: "Linux"
+   - **Region**: misma región
+   - **App Service Plan**: Click en "Create new"
+     - **Name**: `plan-livedomain-prod`
+     - **Sku and size**: Click en "Change size" → "Dev/Test" → "B1" (el más barato)
+5. Click en "Review + create" → "Create"
+
+#### 6.1 Obtener Nombre de Host
+
+1. Cuando termine, click en "Go to resource"
+2. En "Overview", copia el valor de "Default domain" (ej: `app-backend-livedomain-prod.azurewebsites.net`)
+
+**Guárdalo**.
+
+### Paso 7: Crear Azure App Service (Frontend)
+
+Donde va a vivir React.
+
+1. Busca "App Services" en el portal
+2. Click en "+ Create"
+3. Click en "Web App"
+4. Rellena:
+   - **Resource group**: `rg-livedomain-prod`
+   - **Name**: `app-frontend-livedomain-prod` (debe ser único)
+   - **Runtime stack**: "Node 20 LTS"
+   - **Operating System**: "Linux"
+   - **Region**: misma región
+   - **App Service Plan**: Selecciona el que acabas de crear `plan-livedomain-prod` (o crea uno nuevo igual)
+5. Click en "Review + create" → "Create"
+
+#### 7.1 Obtener Nombre de Host
+
+1. Cuando termine, click en "Go to resource"
+2. En "Overview", copia el valor de "Default domain" (ej: `app-frontend-livedomain-prod.azurewebsites.net`)
+
+**Guárdalo**.
+
+### Paso 8: Configurar Variables De Entorno En Azure DevOps
+
+Ahora le decimos a Azure DevOps dónde desplegar y qué configuración usar.
+
+#### 8.1 Crear Variable Group Para Backend
+
+1. Ve a tu proyecto en Azure DevOps: https://dev.azure.com/TuOrganizacion/TuProyecto
+2. A la izquierda, click en "Pipelines"
+3. Click en "Library"
+4. Click en "+ Variable group"
+5. Rellena:
+   - **Name**: `vars-backend`
+6. Agrega estas variables (click en "+ Add"):
+
+| Variable | Valor | Explicación |
+|----------|-------|-------------|
+| `RESOURCE_GROUP` | `rg-livedomain-prod` | Grupo de recursos que creaste |
+| `APP_SERVICE_NAME` | `app-backend-livedomain-prod` | Nombre del App Service backend |
+| `AZURE_SQL_CONNECTION_STRING` | (pegar la que copiaste en 2.4) | Connection string de SQL |
+| `JWT_SECRET_KEY` | `TuClaveSecretaLargaDeMas32Caracteres123!` | Clave para firmar tokens JWT (mínimo 32 caracteres) |
+| `ADMIN_SETUP_KEY` | `TuClaveAdminMuySegura123!` | Clave para el endpoint `/api/admin/database/ensure-created` |
+| `FRONTEND_BASE_URL` | `https://app-frontend-livedomain-prod.azurewebsites.net` | URL del frontend (sin slash al final) |
+| `BACKEND_BASE_URL` | `https://app-backend-livedomain-prod.azurewebsites.net` | URL del backend (sin slash al final) |
+| `STORAGE_CONNECTION_STRING` | (pegar la que copiaste en 3.2) | Connection string de Blob Storage |
+| `PHOTO_STORAGE_BACKEND` | `azure` | Usar Azure Blob Storage |
+| `APPINSIGHTS_INSTRUMENTATION_KEY` | (pegar la que copiaste en 5.1) | Instrumentation Key de Application Insights |
+| `FEATURE_PUBLIC_FEED_ENABLED` | `true` | Feature flag para feed público |
+| `FEATURE_PHOTO_UPLOAD_ENABLED` | `true` | Feature flag para upload de fotos |
+| `FEATURE_MAINTENANCEMODE_ENABLED` | `false` | Feature flag para maintenance mode |
+| `AZURE_APPCONFIG_CONNECTION_STRING` | (pegar la que copiaste en 4.1) | Connection string de App Configuration (opcional) |
+
+7. Click en "Save"
+
+#### 8.2 Crear Variable Group Para Frontend
+
+1. Click en "+ Variable group"
+2. Rellena:
+   - **Name**: `vars-frontend`
+3. Agrega estas variables:
+
+| Variable | Valor | Explicación |
+|----------|-------|-------------|
+| `RESOURCE_GROUP` | `rg-livedomain-prod` | Grupo de recursos |
+| `APP_SERVICE_NAME` | `app-frontend-livedomain-prod` | Nombre del App Service frontend |
+| `API_BASE_URL` | `https://app-backend-livedomain-prod.azurewebsites.net` | URL del backend (sin slash) |
+
+4. Click en "Save"
+
+#### 8.3 Conectar Variable Groups a Pipelines
+
+Para que las pipelines accedan a estas variables:
+
+1. Ve a tu pipeline (ej: `azure-pipelines-backend.yml`)
+2. Click en "Edit"
+3. A la derecha, bajo "Variables", click en "Variable groups"
+4. Click en "Link variable group"
+5. Selecciona `vars-backend`
+6. Click en "Link"
+
+Repite para `azure-pipelines-frontend.yml` con `vars-frontend`.
+
+### Resumen De Lo Que Creaste
+
+| Recurso | Nombre | Propósito |
+|---------|--------|----------|
+| Resource Group | `rg-livedomain-prod` | Carpeta virtual que contiene todo |
+| SQL Server | `sql-livedomain-prod` | Servidor de base de datos |
+| SQL Database | `quotes-db` | Base de datos en el servidor |
+| Storage Account | `salivedomain` | Almacenamiento de fotos |
+| Container | `photos` | Carpeta dentro del storage |
+| App Configuration | `appcfg-livedomain-prod` | Feature flags y configuración |
+| Application Insights | `appins-livedomain-prod` | Logs y telemetría |
+| App Service Backend | `app-backend-livedomain-prod` | Servidor de la API |
+| App Service Frontend | `app-frontend-livedomain-prod` | Servidor de la web |
+
+### Variables De Entorno Locales
+
+Para correr localmente, crea un archivo `.env` en la carpeta `quotes-backend`:
+
+```env
+# Base de datos
+AZURE_SQL_CONNECTION_STRING=Server=tcp:sql-livedomain-prod.database.windows.net,1433;Initial Catalog=quotes-db;Persist Security Info=False;User ID=sqladmin;Password=P@ssw0rd123!Azure2024;Encrypt=True;Connection Timeout=30;
+
+# Autenticación
+JWT_SECRET_KEY=TuClaveSecretaLargaDeMas32Caracteres123!
+ADMIN_SETUP_KEY=TuClaveAdminMuySegura123!
+
+# URLs
+FRONTEND_BASE_URL=http://localhost:5173
+BACKEND_BASE_URL=http://localhost:5000
+
+# Storage
+STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=salivedomain;AccountKey=TuKeyLargaAqui==;EndpointSuffix=core.windows.net
+PHOTO_STORAGE_BACKEND=local
+
+# Feature Flags
+FEATURE_PUBLIC_FEED_ENABLED=true
+FEATURE_PHOTO_UPLOAD_ENABLED=true
+FEATURE_MAINTENANCEMODE_ENABLED=false
+
+# Application Insights (opcional localmente)
+APPINSIGHTS_INSTRUMENTATION_KEY=12345678-1234-1234-1234-123456789012
+
+# App Configuration (opcional)
+AZURE_APPCONFIG_CONNECTION_STRING=Endpoint=https://appcfg-livedomain-prod.azureconfig.io;Id=...;Secret=...
+```
+
+### Troubleshooting De Creación De Recursos
+
+| Error | Causa | Solución |
+|-------|-------|----------|
+| "Name already exists" | El nombre que elegiste ya existe en Azure | Usa un nombre diferente, más único |
+| "Quota exceeded" | Has alcanzado el límite de tu suscripción | Pide que aumenten la cuota o elimina recursos antiguos |
+| "Access denied" | No tienes permisos en Azure | Pide que te den rol "Contributor" o superior |
+| No puedo conectarme a SQL | El firewall está bloqueando | Ve a SQL Server → Firewalls → Agrega tu IP |
+| Storage connection string es incorrecta | Copiaste mal o está expirada | Ve a Access keys y copia nuevamente |
+
 ## Orden Recomendado De Despliegue
 
 1. Crear o validar recursos base: App Service, Azure SQL, Storage, App Configuration, App Insights.

@@ -17,7 +17,7 @@ La solución está pensada para mostrar un ciclo de vida real de una aplicación
 4. Publicación en Azure App Service Linux.
 5. Creación del schema de base de datos de forma controlada.
 6. Observabilidad con logs, Application Insights y trazas.
-7. Feature flags con Azure App Configuration.
+7. Configuración runtime del frontend y feature flags.
 8. Diagnóstico con endpoints de salud y errores reproducibles.
 
 La separación en tres pipelines independientes no es accidental:
@@ -40,7 +40,7 @@ Usuario
       -> EF Core
       -> Azure SQL
       -> Azure Blob Storage para fotos
-      -> Azure App Configuration para feature flags opcionales
+      -> Azure App Configuration opcional para configuración del frontend
       -> Application Insights y logs de App Service
 
 Azure DevOps Pipelines
@@ -54,7 +54,7 @@ Azure DevOps Pipelines
 - Azure App Service Linux para backend y frontend.
 - Azure SQL como única base de datos.
 - Azure Blob Storage para fotos.
-- Azure App Configuration para feature flags opcionales.
+- Azure App Configuration opcional para configuración del frontend.
 - Application Insights para telemetría, trazas y mapa de dependencias.
 - Azure DevOps para pipelines, variable groups y operación del curso.
 
@@ -105,18 +105,6 @@ quotes-frontend/
 - Health checks para operación y troubleshooting.
 - Creación controlada del schema de Azure SQL con un endpoint administrativo.
 
-### Feature flags
-
-El backend expone flags a través de `GET /api/features` y también los usa dentro de la lógica de negocio.
-
-El proyecto soporta estas claves principales:
-
-- `FEATURE_PUBLIC_FEED_ENABLED`
-- `FEATURE_PHOTO_UPLOAD_ENABLED`
-- `FEATURE_MAINTENANCEMODE_ENABLED`
-
-Si usas Azure App Configuration, el backend también puede leer el valor desde configuración de feature flags. El valor esperado para demo y operación es que el flag se pueda cambiar sin redeploy.
-
 ## Frontend
 
 ### Stack técnico
@@ -134,7 +122,9 @@ Si usas Azure App Configuration, el backend también puede leer el valor desde c
 - Carga del feed público.
 - Carga de pensamientos propios.
 - Likes y subida de fotos.
-- Inyección en runtime de `API_BASE_URL` desde `/config.js`.
+- Inyección en runtime de `API_BASE_URL` y feature flags desde `/config.js`.
+
+El frontend es la fuente de verdad para los feature flags de interfaz y comportamiento visible. El backend ya no expone ni evalúa flags.
 
 ## Endpoints Del Backend
 
@@ -146,7 +136,6 @@ Si usas Azure App Configuration, el backend también puede leer el valor desde c
 | GET | `/health` | Salud general |
 | GET | `/health/db` | Verificación de conexión a Azure SQL |
 | GET | `/apispec.json` | Redirección al OpenAPI |
-| GET | `/api/features` | Lee flags actuales |
 | POST | `/api/auth/register` | Registro de usuario |
 | POST | `/api/auth/login` | Inicio de sesión |
 | GET | `/api/quotes?scope=feed` | Feed público |
@@ -205,10 +194,6 @@ El proyecto no está planteado alrededor de migraciones EF Core para este flujo 
 | `AZURE_STORAGE_CONTAINER_NAME=quote-photos` | Contenedor |
 | `MAX_PHOTO_MB=4` | Límite de fotos |
 | `LOG_LEVEL=Information` | Nivel de logs |
-| `FEATURE_REFRESH_SECONDS=10` | Refresco de flags |
-| `FEATURE_PUBLIC_FEED_ENABLED=true` | Flag del feed |
-| `FEATURE_PHOTO_UPLOAD_ENABLED=true` | Flag de fotos |
-| `FEATURE_MAINTENANCEMODE_ENABLED=false` | Flag de mantenimiento |
 | `ENABLE_ORYX_BUILD=false` | Evita build en Azure |
 | `SCM_DO_BUILD_DURING_DEPLOYMENT=false` | Evita build remoto |
 
@@ -225,6 +210,8 @@ El proyecto no está planteado alrededor de migraciones EF Core para este flujo 
 | `WEBSITES_PORT=8080` | Puerto del contenedor |
 | `ENABLE_ORYX_BUILD=false` | Evita build en Azure |
 | `SCM_DO_BUILD_DURING_DEPLOYMENT=false` | Evita build remoto |
+
+Los feature flags de UI se documentan en [quotes-frontend/README.md](../quotes-frontend/README.md).
 
 ## Azure DevOps Variable Groups
 
@@ -257,6 +244,9 @@ El proyecto no está planteado alrededor de migraciones EF Core para este flujo 
 | `webAppName` | App Service del frontend |
 | `environmentName` | Nombre del entorno |
 | `apiBaseUrl` | URL de la API |
+| `featurePublicFeedEnabled` | Flag del feed para la UI |
+| `featurePhotoUploadEnabled` | Flag de fotos para la UI |
+| `featureMaintenanceModeEnabled` | Flag de mantenimiento para la UI |
 | `nodeVersion` | Versión de Node.js |
 
 ## Pipelines
@@ -318,14 +308,6 @@ En este ejemplo:
 - `mydb` = nombre de la base de datos
 - `admin` = usuario
 - `P@ssw0rd123` = contraseña
-
-#### ¿Qué es un Feature Flag?
-
-Un **feature flag** es una variable que puedes cambiar **sin re-desplegar la aplicación**. Permite activar/desactivar funcionalidades en producción en tiempo real.
-
-**Ejemplo:**
-- `FEATURE_PHOTO_UPLOAD_ENABLED=false` desactiva fotos en producción
-- Luego cambias en Azure a `true` y ¡se activa sin re-desplegar!
 
 #### ¿Qué es Application Insights?
 
@@ -436,7 +418,7 @@ Donde se guardan las fotos.
 
 ### Paso 4: Crear Azure App Configuration
 
-Donde se guardan los feature flags.
+Donde se guardan opciones de configuración runtime para el frontend.
 
 1. Busca "App Configuration" en el portal
 2. Click en "+ Create"
@@ -454,9 +436,10 @@ Donde se guardan los feature flags.
 
 **Guárdalo**.
 
-#### 4.2 Agregar Feature Flags (Opcional Para Ahora)
+#### 4.2 Agregar Feature Flags Del Frontend (Opcional)
 
-Puedes saltarte esto por ahora. Lo harás en producción después de desplegar.
+Si vas a usar App Configuration para el frontend, define aquí las claves que consume `quotes-frontend/server.mjs`.
+Si todavía no lo necesitas, puedes saltarte este paso y usar variables de entorno del App Service del frontend.
 
 ### Paso 5: Crear Application Insights
 
@@ -553,9 +536,6 @@ Ahora le decimos a Azure DevOps dónde desplegar y qué configuración usar.
 | `STORAGE_CONNECTION_STRING` | (pegar la que copiaste en 3.2) | Connection string de Blob Storage |
 | `PHOTO_STORAGE_BACKEND` | `azure` | Usar Azure Blob Storage |
 | `APPINSIGHTS_INSTRUMENTATION_KEY` | (pegar la que copiaste en 5.1) | Instrumentation Key de Application Insights |
-| `FEATURE_PUBLIC_FEED_ENABLED` | `true` | Feature flag para feed público |
-| `FEATURE_PHOTO_UPLOAD_ENABLED` | `true` | Feature flag para upload de fotos |
-| `FEATURE_MAINTENANCEMODE_ENABLED` | `false` | Feature flag para maintenance mode |
 | `AZURE_APPCONFIG_CONNECTION_STRING` | (pegar la que copiaste en 4.1) | Connection string de App Configuration (opcional) |
 
 7. Click en "Save"
@@ -622,11 +602,6 @@ BACKEND_BASE_URL=http://localhost:5000
 STORAGE_CONNECTION_STRING=DefaultEndpointsProtocol=https;AccountName=salivedomain;AccountKey=TuKeyLargaAqui==;EndpointSuffix=core.windows.net
 PHOTO_STORAGE_BACKEND=local
 
-# Feature Flags
-FEATURE_PUBLIC_FEED_ENABLED=true
-FEATURE_PHOTO_UPLOAD_ENABLED=true
-FEATURE_MAINTENANCEMODE_ENABLED=false
-
 # Application Insights (opcional localmente)
 APPINSIGHTS_INSTRUMENTATION_KEY=12345678-1234-1234-1234-123456789012
 
@@ -669,9 +644,6 @@ ADMIN_SETUP_KEY=<clave secreta>
 FRONTEND_BASE_URL=http://localhost:5173
 BACKEND_BASE_URL=http://localhost:5000
 PHOTO_STORAGE_BACKEND=local
-FEATURE_PUBLIC_FEED_ENABLED=true
-FEATURE_PHOTO_UPLOAD_ENABLED=true
-FEATURE_MAINTENANCEMODE_ENABLED=false
 ```
 
 #### Comandos
@@ -983,7 +955,6 @@ npm run dev
 - Usa una `JWT_SECRET_KEY` larga y aleatoria.
 - Protege `ADMIN_SETUP_KEY` como secreto real.
 - Limita CORS a dominios reales del frontend.
-- No dejes `FEATURE_MAINTENANCEMODE_ENABLED` en `true` por accidente.
 - Usa `PHOTO_STORAGE_BACKEND=azure` en producción.
 - Revisa Application Insights y logs ante cualquier cambio de flag o despliegue.
 

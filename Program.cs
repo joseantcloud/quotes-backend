@@ -35,12 +35,6 @@ if (!string.IsNullOrWhiteSpace(appConfigConnectionString)
     appConfigConnectionString = $"Endpoint={appConfigConnectionString}";
 }
 
-var featureFlagRefreshSeconds = int.TryParse(
-    builder.Configuration["FEATURE_REFRESH_SECONDS"],
-    out var parsedRefreshSeconds)
-    ? Math.Max(parsedRefreshSeconds, 1)
-    : 10;
-
 try
 {
     if (!string.IsNullOrWhiteSpace(appConfigConnectionString))
@@ -48,11 +42,7 @@ try
         builder.Configuration.AddAzureAppConfiguration(options =>
         {
             options.Connect(appConfigConnectionString)
-                .Select("*")
-                .UseFeatureFlags(featureFlags =>
-                {
-                    featureFlags.SetRefreshInterval(TimeSpan.FromSeconds(featureFlagRefreshSeconds));
-                });
+                .Select("*");
         });
 
         appConfigurationEnabled = true;
@@ -62,11 +52,7 @@ try
         builder.Configuration.AddAzureAppConfiguration(options =>
         {
             options.Connect(new Uri(appConfigEndpoint), new DefaultAzureCredential())
-                .Select("*")
-                .UseFeatureFlags(featureFlags =>
-                {
-                    featureFlags.SetRefreshInterval(TimeSpan.FromSeconds(featureFlagRefreshSeconds));
-                });
+                .Select("*");
         });
 
         appConfigurationEnabled = true;
@@ -207,7 +193,6 @@ builder.Services.AddAzureAppConfiguration();
 
 builder.Services.AddScoped<PasswordHasher<AppUser>>();
 builder.Services.AddScoped<JwtService>();
-builder.Services.AddSingleton<FeatureFlagService>();
 
 var photoBackend = builder.Configuration["PHOTO_STORAGE_BACKEND"] ?? "local";
 
@@ -487,26 +472,6 @@ app.MapPost("/api/admin/database/ensure-created", async (
 
 app.MapGet("/apispec.json", () => Results.Redirect("/v1/apispec.json"));
 
-app.MapGet("/api/features", (FeatureFlagService features, TelemetryClient telemetry) =>
-{
-    var current = features.GetFeatures();
-
-    telemetry.TrackEvent("features.loaded", new Dictionary<string, string>
-    {
-        ["public_feed_enabled"] = current.PublicFeedEnabled.ToString(),
-        ["photo_upload_enabled"] = current.PhotoUploadEnabled.ToString(),
-        ["maintenance_mode_enabled"] = current.MaintenanceModeEnabled.ToString()
-    });
-
-    app.Logger.LogInformation(
-        "features.loaded public_feed_enabled={PublicFeedEnabled} photo_upload_enabled={PhotoUploadEnabled} maintenance_mode_enabled={MaintenanceModeEnabled}",
-        current.PublicFeedEnabled,
-        current.PhotoUploadEnabled,
-        current.MaintenanceModeEnabled);
-
-    return Results.Ok(current);
-});
-
 app.MapPost("/api/auth/register", async (
     RegisterRequest request,
     QuotesDbContext db,
@@ -653,7 +618,6 @@ app.MapGet("/api/quotes", async (
     HttpRequest request,
     ClaimsPrincipal principal,
     QuotesDbContext db,
-    FeatureFlagService featureFlags,
     TelemetryClient telemetry,
     CancellationToken cancellationToken) =>
 {
@@ -692,24 +656,6 @@ app.MapGet("/api/quotes", async (
         return Results.Ok(mine.Select(x => ToQuoteResponse(x, userId)));
     }
 
-    var features = featureFlags.GetFeatures();
-
-    telemetry.TrackEvent("quotes.feed.features_checked", new Dictionary<string, string>
-    {
-        ["public_feed_enabled"] = features.PublicFeedEnabled.ToString(),
-        ["maintenance_mode_enabled"] = features.MaintenanceModeEnabled.ToString()
-    });
-
-    if (!features.PublicFeedEnabled)
-    {
-        telemetry.TrackEvent("quotes.feed_blocked", new Dictionary<string, string>
-        {
-            ["reason"] = "feature_disabled"
-        });
-
-        return Results.Ok(Array.Empty<QuoteResponse>());
-    }
-
     var publicQuotes = await query
         .Where(x => x.IsPublic)
         .OrderByDescending(x => x.CreatedAt)
@@ -735,7 +681,6 @@ app.MapPost("/api/quotes", async (
     ClaimsPrincipal principal,
     QuotesDbContext db,
     IPhotoStorageService photoStorage,
-    FeatureFlagService featureFlags,
     TelemetryClient telemetry,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
@@ -765,21 +710,6 @@ app.MapPost("/api/quotes", async (
 
     if (photo is not null && photo.Length > 0)
     {
-        if (!featureFlags.GetFeatures().PhotoUploadEnabled)
-        {
-            logger.LogWarning(
-                "quote.photo_upload_rejected feature_disabled user_id={UserId}",
-                userId);
-
-            telemetry.TrackEvent("quote.photo_upload_blocked", new Dictionary<string, string>
-            {
-                ["user_id"] = userId.ToString(),
-                ["reason"] = "feature_disabled"
-            });
-
-            return Results.BadRequest(new { error = "La subida de fotos esta desactivada." });
-        }
-
         try
         {
             storedPhoto = await photoStorage.SaveAsync(photo, cancellationToken);
@@ -845,7 +775,6 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
     ClaimsPrincipal principal,
     QuotesDbContext db,
     IPhotoStorageService photoStorage,
-    FeatureFlagService featureFlags,
     TelemetryClient telemetry,
     ILogger<Program> logger,
     CancellationToken cancellationToken) =>
@@ -893,23 +822,6 @@ app.MapPut("/api/quotes/{quoteId:int}", async (
 
     if (photo is not null && photo.Length > 0)
     {
-        if (!featureFlags.GetFeatures().PhotoUploadEnabled)
-        {
-            logger.LogWarning(
-                "quote.photo_upload_rejected feature_disabled user_id={UserId} quote_id={QuoteId}",
-                userId,
-                quote.Id);
-
-            telemetry.TrackEvent("quote.photo_upload_blocked", new Dictionary<string, string>
-            {
-                ["user_id"] = userId.ToString(),
-                ["quote_id"] = quote.Id.ToString(),
-                ["reason"] = "feature_disabled"
-            });
-
-            return Results.BadRequest(new { error = "La subida de fotos esta desactivada." });
-        }
-
         try
         {
             await photoStorage.DeleteAsync(quote.PhotoStorageKey, cancellationToken);

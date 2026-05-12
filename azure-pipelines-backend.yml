@@ -372,26 +372,6 @@ stages:
                           "slotSetting": false
                         },
                         {
-                          "name": "FEATURE_REFRESH_SECONDS",
-                          "value": "10",
-                          "slotSetting": false
-                        },
-                        {
-                          "name": "FEATURE_PUBLIC_FEED_ENABLED",
-                          "value": "true",
-                          "slotSetting": false
-                        },
-                        {
-                          "name": "FEATURE_PHOTO_UPLOAD_ENABLED",
-                          "value": "true",
-                          "slotSetting": false
-                        },
-                        {
-                          "name": "FEATURE_MAINTENANCEMODE_ENABLED",
-                          "value": "false",
-                          "slotSetting": false
-                        },
-                        {
                           "name": "ENABLE_ORYX_BUILD",
                           "value": "false",
                           "slotSetting": false

@@ -20,11 +20,12 @@ La solución está pensada para mostrar un ciclo de vida real de una aplicación
 7. Configuración runtime del frontend y feature flags.
 8. Diagnóstico con endpoints de salud y errores reproducibles.
 
-La separación en tres pipelines independientes no es accidental:
+La separación en cuatro pipelines independientes no es accidental:
 
 - El backend se despliega por su cuenta porque contiene la API, la autenticación, la lógica de negocio y el acceso a datos.
 - El schema se crea aparte para evitar que un despliegue de código tenga efectos destructivos o dependencias ocultas sobre la base de datos.
 - El frontend se despliega de forma independiente porque es estático, tiene su propia cadena de empaquetado y solo necesita conocer la URL de la API en runtime.
+- El backend tiene dos rutas de despliegue: una App Service sencilla para la parte 1 del curso y una Container App para la parte 2 de modernización.
 
 ## Arquitectura
 
@@ -35,7 +36,12 @@ Usuario
       -> llama al backend
 
 Usuario
-  -> Azure App Service Linux (Backend: ASP.NET Core Minimal API)
+    -> Azure App Service Linux (Backend: ASP.NET Core Minimal API, parte 1)
+      -> despliegue ZIP directo
+      -> App Settings en App Service
+
+Usuario
+    -> Azure Container Apps (Backend: ASP.NET Core Minimal API, parte 2)
       -> JWT Authentication
       -> EF Core
       -> Azure SQL
@@ -51,7 +57,9 @@ Azure DevOps Pipelines
 
 ### Servicios de Azure utilizados
 
-- Azure App Service Linux para backend y frontend.
+- Azure App Service Linux para el backend de la parte 1.
+- Azure Container Apps para el backend de la parte 2.
+- Azure App Service Linux para el frontend.
 - Azure SQL como única base de datos.
 - Azure Blob Storage para fotos.
 - Azure App Configuration opcional para configuración del frontend.
@@ -93,7 +101,7 @@ quotes-frontend/
 - Azure Blob Storage para fotos.
 - Azure App Configuration opcional para feature flags.
 - Application Insights y logging estructurado.
-- Despliegue en Azure App Service Linux.
+- Despliegue en Azure Container Apps.
 
 ### Qué resuelve
 
@@ -221,7 +229,10 @@ Los feature flags de UI se documentan en [quotes-frontend/README.md](../quotes-f
 |---|---|
 | `azureServiceConnection` | Service connection de Azure |
 | `resourceGroupName` | Resource group |
-| `webAppName` | App Service del backend |
+| `webAppName` | App Service del backend para la parte 1 |
+| `acrServiceConnection` | Service connection para ACR en Azure DevOps |
+| `acrLoginServer` | Login server del ACR, por ejemplo `acrlivedomainprod.azurecr.io` |
+| `containerAppName` | Azure Container App del backend |
 | `backendBaseUrl` | URL pública del backend |
 | `frontendBaseUrl` | URLs permitidas en CORS |
 | `environmentName` | Nombre del entorno |
@@ -253,7 +264,7 @@ Los feature flags de UI se documentan en [quotes-frontend/README.md](../quotes-f
 
 ### 1. `azure-pipelines-backend.yml`
 
-Este pipeline:
+Este pipeline es la ruta sencilla de la parte 1:
 
 1. Restaura dependencias.
 2. Compila el backend.
@@ -265,7 +276,22 @@ Este pipeline:
 8. Valida `GET /health`.
 9. Opcionalmente valida `GET /health/db`.
 
-### 2. `azure-pipelines-create-schema.yml`
+Cada commit en `main` del repo backend dispara una nueva build y un nuevo despliegue al App Service sencillo.
+
+### 2. `azure-pipelines-backend-container.yml`
+
+Este pipeline es la ruta de modernización de la parte 2:
+
+1. Construye la imagen Docker del backend.
+2. Publica una nueva etiqueta en Azure Container Registry.
+3. Configura el pull de la imagen con la identidad del Container App.
+4. Actualiza la revisión del Container App.
+5. Inyecta variables de entorno del backend.
+6. Valida `GET /health` contra la URL pública.
+
+Cada commit en `main` del repo backend dispara una nueva build, genera una nueva versión de imagen y actualiza el Container App.
+
+### 3. `azure-pipelines-create-schema.yml`
 
 Este pipeline es manual y no despliega código.
 
@@ -276,7 +302,7 @@ Este pipeline es manual y no despliega código.
 5. Crea las tablas `Users`, `Quotes` y `QuoteLikes`.
 6. Valida `GET /api/quotes?scope=feed`.
 
-### 3. `azure-pipelines-frontend.yml`
+### 4. `azure-pipelines-frontend.yml`
 
 Este pipeline:
 

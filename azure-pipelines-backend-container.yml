@@ -1,0 +1,218 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pr: none
+
+pool:
+  name: Default
+
+variables:
+  - group: vars-backend
+
+  - name: imageRepository
+    value: azurequotes-api
+
+  - name: imageTag
+    value: $(Build.BuildId)
+
+  - name: imageName
+    value: $(acrLoginServer)/$(imageRepository):$(imageTag)
+
+stages:
+  - stage: Build
+    displayName: Build and Push Backend Image
+    jobs:
+      - job: BuildBackendImage
+        displayName: Build ASP.NET Core Backend Image
+        steps:
+          - checkout: self
+            displayName: Checkout repository
+
+          - powershell: |
+              Write-Host "============================================================"
+              Write-Host "STEP 1 - BUILD CONTEXT"
+              Write-Host "============================================================"
+              Write-Host "Repository root:"
+              Write-Host "$(System.DefaultWorkingDirectory)"
+              Write-Host ""
+              Write-Host "ACR login server:"
+              Write-Host "$(acrLoginServer)"
+              Write-Host ""
+              Write-Host "Container app name:"
+              Write-Host "$(containerAppName)"
+              Write-Host ""
+              Write-Host "Image name:"
+              Write-Host "$(imageName)"
+              Write-Host "============================================================"
+            displayName: Print build context
+
+          - task: Docker@2
+            displayName: Build and push backend image to ACR
+            inputs:
+              command: buildAndPush
+              repository: '$(imageRepository)'
+              dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+              buildContext: '$(Build.SourcesDirectory)'
+              containerRegistry: '$(acrServiceConnection)'
+              tags: |
+                $(imageTag)
+                latest
+
+  - stage: Deploy
+    displayName: Deploy Backend Container App
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployBackend
+        displayName: Deploy Backend to Azure Container Apps
+        environment: '$(environmentName)'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 2 - DEPLOY CONTEXT"
+                    Write-Host "============================================================"
+                    Write-Host "Azure Service Connection:"
+                    Write-Host "$(azureServiceConnection)"
+                    Write-Host ""
+                    Write-Host "Resource Group:"
+                    Write-Host "$(resourceGroupName)"
+                    Write-Host ""
+                    Write-Host "Container App Name:"
+                    Write-Host "$(containerAppName)"
+                    Write-Host ""
+                    Write-Host "Image:"
+                    Write-Host "$(imageName)"
+                    Write-Host "============================================================"
+                  displayName: Print deploy context
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 3 - VALIDATING REQUIRED VARIABLES"
+                    Write-Host "============================================================"
+
+                    $requiredVariables = @{
+                      "azureServiceConnection" = "$(azureServiceConnection)"
+                      "resourceGroupName" = "$(resourceGroupName)"
+                      "containerAppName" = "$(containerAppName)"
+                      "acrServiceConnection" = "$(acrServiceConnection)"
+                      "acrLoginServer" = "$(acrLoginServer)"
+                      "backendBaseUrl" = "$(backendBaseUrl)"
+                      "frontendBaseUrl" = "$(frontendBaseUrl)"
+                      "environmentName" = "$(environmentName)"
+                      "photoStorageBackend" = "$(photoStorageBackend)"
+                      "storageContainerName" = "$(storageContainerName)"
+                      "maxPhotoMb" = "$(maxPhotoMb)"
+                      "logLevel" = "$(logLevel)"
+                    }
+
+                    foreach ($item in $requiredVariables.GetEnumerator()) {
+                      if ([string]::IsNullOrWhiteSpace($item.Value)) {
+                        Write-Error "$($item.Key) is empty."
+                        exit 1
+                      }
+
+                      Write-Host "$($item.Key): $($item.Value)"
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:JWT_SECRET_KEY)) {
+                      Write-Error "JWT_SECRET_KEY is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:ADMIN_SETUP_KEY)) {
+                      Write-Error "ADMIN_SETUP_KEY is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:AZURE_SQL_CONNECTION_STRING)) {
+                      Write-Error "AZURE_SQL_CONNECTION_STRING is empty."
+                      exit 1
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($env:AZURE_STORAGE_CONNECTION_STRING)) {
+                      Write-Error "AZURE_STORAGE_CONNECTION_STRING is empty."
+                      exit 1
+                    }
+
+                    Write-Host "JWT_SECRET_KEY: present, length $($env:JWT_SECRET_KEY.Length)"
+                    Write-Host "ADMIN_SETUP_KEY: present, length $($env:ADMIN_SETUP_KEY.Length)"
+                    Write-Host "AZURE_SQL_CONNECTION_STRING: present"
+                    Write-Host "AZURE_STORAGE_CONNECTION_STRING: present"
+                    Write-Host "Required variable validation completed successfully."
+                    Write-Host "============================================================"
+                  displayName: Validate deployment variables
+                  env:
+                    JWT_SECRET_KEY: $(JWT_SECRET_KEY)
+                    ADMIN_SETUP_KEY: $(ADMIN_SETUP_KEY)
+                    AZURE_SQL_CONNECTION_STRING: $(AZURE_SQL_CONNECTION_STRING)
+                    AZURE_STORAGE_CONNECTION_STRING: $(AZURE_STORAGE_CONNECTION_STRING)
+                    AZURE_APP_CONFIG_CONNECTION_STRING: $(AZURE_APP_CONFIG_CONNECTION_STRING)
+
+                - task: AzureCLI@2
+                  displayName: Configure registry and deploy image
+                  inputs:
+                    azureSubscription: '$(azureServiceConnection)'
+                    scriptType: pscore
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az containerapp registry set `
+                        --name "$(containerAppName)" `
+                        --resource-group "$(resourceGroupName)" `
+                        --server "$(acrLoginServer)" `
+                        --identity system
+
+                      az containerapp update `
+                        --name "$(containerAppName)" `
+                        --resource-group "$(resourceGroupName)" `
+                        --image "$(imageName)"
+
+                      az containerapp update `
+                        --name "$(containerAppName)" `
+                        --resource-group "$(resourceGroupName)" `
+                        --set-env-vars "DOTNET_ENVIRONMENT=Production" "ASPNETCORE_URLS=http://+:80" "WEBSITES_PORT=80" "BACKEND_BASE_URL=$(backendBaseUrl)" "FRONTEND_BASE_URL=$(frontendBaseUrl)" "JWT_SECRET_KEY=$(JWT_SECRET_KEY)" "ADMIN_SETUP_KEY=$(ADMIN_SETUP_KEY)" "AZURE_SQL_CONNECTION_STRING=$(AZURE_SQL_CONNECTION_STRING)" "AZURE_APP_CONFIG_CONNECTION_STRING=$(AZURE_APP_CONFIG_CONNECTION_STRING)" "PHOTO_STORAGE_BACKEND=$(photoStorageBackend)" "AZURE_STORAGE_CONNECTION_STRING=$(AZURE_STORAGE_CONNECTION_STRING)" "AZURE_STORAGE_CONTAINER_NAME=$(storageContainerName)" "MAX_PHOTO_MB=$(maxPhotoMb)" "LOG_LEVEL=$(logLevel)"
+                  env:
+                    JWT_SECRET_KEY: $(JWT_SECRET_KEY)
+                    ADMIN_SETUP_KEY: $(ADMIN_SETUP_KEY)
+                    AZURE_SQL_CONNECTION_STRING: $(AZURE_SQL_CONNECTION_STRING)
+                    AZURE_STORAGE_CONNECTION_STRING: $(AZURE_STORAGE_CONNECTION_STRING)
+                    AZURE_APP_CONFIG_CONNECTION_STRING: $(AZURE_APP_CONFIG_CONNECTION_STRING)
+
+                - powershell: |
+                    Write-Host "============================================================"
+                    Write-Host "STEP 4 - VERIFYING DEPLOYMENT"
+                    Write-Host "============================================================"
+
+                    $healthUrl = "$(backendBaseUrl)/health"
+                    $maxAttempts = 12
+                    $attempt = 1
+                    $healthy = $false
+
+                    while ($attempt -le $maxAttempts) {
+                      try {
+                        $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 20
+                        if ($response.StatusCode -eq 200) {
+                          $healthy = $true
+                          Write-Host "Health check succeeded on attempt $attempt."
+                          break
+                        }
+                      }
+                      catch {
+                        Write-Host "Attempt $attempt failed: $($_.Exception.Message)"
+                      }
+
+                      $attempt++
+                    }
+
+                    if (-not $healthy) {
+                      Write-Error "Backend did not become healthy in time."
+                      exit 1
+                    }
+
+                    Write-Host "Deployment completed successfully."
+                    Write-Host "============================================================"
+                  displayName: Validate backend health

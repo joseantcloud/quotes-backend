@@ -1006,3 +1006,129 @@ Con esto, Application Insights puede mostrar el flujo entre App Service, Azure S
 ---
 
 Si quieres, el siguiente paso natural es adaptar este README a una versión más corta para portada del curso y dejar una versión larga como documentación técnica interna.
+
+## Modernización: Contenerización y despliegue en Azure Container Apps (ACR → Container Apps)
+
+Esta sección describe pasos prácticos para convertir el backend en una imagen Docker, subirla a Azure Container Registry (ACR) y desplegarla en Azure Container Apps. Incluye un `Dockerfile` de ejemplo y comandos `az` para ejecutar en tu cuenta.
+
+Requisitos previos
+- Azure CLI instalada y autenticada (`az login`).
+- Extensiones necesarias: `az extension add --name containerapp --upgrade` y `az extension add --name acr` (si no están instaladas).
+- Permisos para crear recursos en el `resource group` o una service principal con permiso para ACR/Container Apps.
+
+1) Crear ACR (Azure Container Registry)
+
+```bash
+az acr create --resource-group rg-livedomain-prod --name acrlivedomainprod --sku Standard --location eastus
+az acr login --name acrlivedomainprod
+```
+
+2) Dockerfile (ubicado en la raíz del repositorio `quotes-backend/Dockerfile`)
+
+El repositorio incluye un `Dockerfile` multi-stage optimizado para .NET 10. Ejemplo:
+
+```dockerfile
+# build stage
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+# copy csproj and restore
+COPY *.sln ./
+COPY AzureQuotes.Api/*.csproj ./AzureQuotes.Api/
+RUN dotnet restore
+
+# copy everything and publish
+COPY . .
+WORKDIR /src/AzureQuotes.Api
+RUN dotnet publish -c Release -o /app/publish /p:PublishTrimmed=true
+
+# runtime stage
+FROM mcr.microsoft.com/dotnet/aspnet:10.0 AS runtime
+WORKDIR /app
+ENV ASPNETCORE_URLS=http://+:80
+EXPOSE 80
+COPY --from=build /app/publish ./
+ENTRYPOINT ["dotnet", "AzureQuotes.Api.dll"]
+```
+
+3) Construir y etiquetar la imagen
+
+```bash
+az acr login --name acrlivedomainprod
+ACR_NAME=acrlivedomainprod
+IMAGE_NAME=${ACR_NAME}.azurecr.io/azurequotes-api:latest
+docker build -f Dockerfile -t $IMAGE_NAME .
+docker push $IMAGE_NAME
+```
+
+4) Crear un Environment para Azure Container Apps (si no existe)
+
+```bash
+az containerapp env create --name aca-env-livedomain --resource-group rg-livedomain-prod --location eastus
+```
+
+5) Crear la Container App apuntando a la imagen en ACR
+
+Si tu ACR requiere autenticación, usa `--registry-server`, `--registry-username` y `--registry-password` o un service principal/managed identity.
+
+```bash
+az containerapp create \
+  --name azurequotes-api \
+  --resource-group rg-livedomain-prod \
+  --environment aca-env-livedomain \
+  --image acrlivedomainprod.azurecr.io/azurequotes-api:latest \
+  --ingress 'external' --target-port 80 \
+  --cpu 0.5 --memory 1.0Gi \
+  --registry-server acrlivedomainprod.azurecr.io \
+  --registry-username <acr-username> \
+  --registry-password <acr-password> \
+  --env-vars "ASPNETCORE_ENVIRONMENT=Production" "WEBSITES_PORT=80" "JWT_SECRET_KEY=<your-jwt-secret>" "AZURE_SQL_CONNECTION_STRING=<conn-string>" "STORAGE_CONNECTION_STRING=<storage-conn>"
+```
+
+6) Hacer deploy automatizado en CI (snippet ejemplo para Azure DevOps)
+
+```yaml
+# task: Docker@2
+- task: Docker@2
+  displayName: Build and push image
+  inputs:
+    command: buildAndPush
+    repository: acrlivedomainprod.azurecr.io/azurequotes-api
+    dockerfile: Dockerfile
+    tags: latest
+    containerRegistry: 'ACR-Service-Connection'
+
+# Luego, desploy a Container Apps usando AzureCLI@2
+- task: AzureCLI@2
+  displayName: Deploy Container App
+  inputs:
+    azureSubscription: 'ACR-Service-Connection'
+    scriptType: bash
+    scriptLocation: inlineScript
+    inlineScript: |
+      az containerapp revision set-mode --name azurequotes-api --resource-group $(RESOURCE_GROUP) --mode single
+      az containerapp update --name azurequotes-api --resource-group $(RESOURCE_GROUP) --set properties.template.containers[0].image=acrlivedomainprod.azurecr.io/azurequotes-api:$(Build.BuildId)
+```
+
+7) Variables y secretos
+
+Guarda secretos sensibles (JWT keys, connection strings) como **secrets** en tu pipeline o en Key Vault y pásalos como `--env-vars` o `--secrets` para Container Apps. No subas nunca valores sensibles al repositorio.
+
+8) Mapeo de `appSettings` y variables de entorno
+
+Si tienes un JSON de `appSettings` (por ejemplo los valores que usas en App Service), conviértelos en variables de entorno para Container App. Ejemplo de mapeo:
+
+- `API_BASE_URL` → `API_BASE_URL`
+- `PUBLIC_FEED` → `featurePublicFeedEnabled` (o maneja el mapeo en `server.mjs`)
+- `PHOTO_UPLOAD` → `featurePhotoUploadEnabled`
+- `MaintenanceMode` → `featureMaintenanceModeEnabled`
+
+9) Validar
+
+- `az containerapp show --name azurequotes-api --resource-group rg-livedomain-prod`
+- Accede a `https://<containerapp-hostname>` y valida `/health`.
+
+Notas finales
+- Recomendamos usar ACR Tasks o pipeline CI para builds reproducibles.
+- Usa `--secrets` y Key Vault para no exponer valores sensibles.
+- Para escalado y observabilidad, conecta Application Insights y revisa logs.

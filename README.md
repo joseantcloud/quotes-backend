@@ -113,6 +113,78 @@ quotes-frontend/
 - Health checks para operación y troubleshooting.
 - Creación controlada del schema de Azure SQL con un endpoint administrativo.
 
+### Feature flags
+
+Los feature flags de UI pueden expresarse de dos maneras compatibles:
+
+- Como **Feature flags** en Azure App Configuration (recomendado para toggles centralizados).
+- Como **App Settings / variables** en App Service o en el variable group `vars-frontend` (útil si no quieres App Configuration).
+
+Cómo funciona en esta app
+- `server.mjs` intenta leer flags desde Azure App Configuration (`prodquotesappconfig`) si existe `AZURE_APPCONFIG_CONNECTION_STRING` o `AZURE_APPCONFIG_ENDPOINT`.
+- Si App Configuration no está disponible se usa el fallback desde App Service App Settings / `vars-frontend`.
+- El resultado se inyecta en runtime en `window.__APP_CONFIG__` y `src/api.js` lo expone como `RUNTIME_FEATURE_FLAGS`.
+
+Nombres de flags (portal App Configuration)
+- `PUBLIC_FEED` → controla si el feed público se muestra.
+- `PHOTO_UPLOAD` → controla si el componente de subida de fotos está habilitado.
+- `MaintenanceMode` → activa una UI de mantenimiento global.
+
+Mapeo recomendado a variables de App Service / var-group
+
+Si prefieres no usar App Configuration, agrega las siguientes variables en el `variable group` `vars-frontend` o como App Settings en el App Service frontend:
+
+| Variable en var-group | Descripción |
+|---|---|
+| `featurePublicFeedEnabled` | `true` ó `false` — controla feed público |
+| `featurePhotoUploadEnabled` | `true` ó `false` — controla subida de fotos |
+| `featureMaintenanceModeEnabled` | `true` ó `false` — modo mantenimiento |
+
+Cómo propagar los valores desde `vars-frontend` a App Service en Azure DevOps pipeline (snippet):
+
+```yaml
+variables:
+  - group: vars-frontend
+
+steps:
+  - task: AzureWebApp@1
+    inputs:
+      azureSubscription: $(azureServiceConnection)
+      appName: $(webAppName)
+      package: '$(System.DefaultWorkingDirectory)/dist'
+      appSettings: |
+        -API_BASE_URL=$(apiBaseUrl)
+        -featurePublicFeedEnabled=$(featurePublicFeedEnabled)
+        -featurePhotoUploadEnabled=$(featurePhotoUploadEnabled)
+        -featureMaintenanceModeEnabled=$(featureMaintenanceModeEnabled)
+```
+
+Cómo crear flags en App Configuration (portal)
+1. Abre tu instancia `prodquotesappconfig` en Azure Portal.
+2. Ve a **Feature Manager** → **+ Add feature flag**.
+3. Usa los nombres: `PUBLIC_FEED`, `PHOTO_UPLOAD`, `MaintenanceMode`.
+4. Define las condiciones (filters) o valores por defecto y publica.
+
+Comportamiento de refresco
+- `server.mjs` respeta `FEATURE_FLAGS_REFRESH_SECONDS` (valor por defecto `30s`) cuando está configurado; para cambios inmediatos reduce ese valor.
+
+Notas operativas
+- Para entornos con Managed Identity, asigne el rol **App Configuration Data Reader** al identity del App Service y usa `AZURE_APPCONFIG_ENDPOINT` en lugar de connection strings.
+- Mantén en `vars-frontend` solo los flags necesarios para evitar duplicidad de fuentes de verdad. Si usas App Configuration, documenta en el equipo que ese es el source-of-truth.
+
+Ejemplo rápido — JSON de appSettings que puedes convertir en variables del variable group `vars-frontend`:
+
+```json
+{
+  "API_BASE_URL": "https://app-backend-livedomain-prod.azurewebsites.net",
+  "PUBLIC_FEED": true,
+  "PHOTO_UPLOAD": true,
+  "MaintenanceMode": false
+}
+```
+
+Si necesitas que la UI se actualice sin redeploy, usa App Configuration; si prefieres simplicidad (sin recursos adicionales) usa `vars-frontend` y actualiza App Settings del App Service.
+
 ## Frontend
 
 ### Stack técnico
